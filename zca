@@ -1,0 +1,4734 @@
+*N740800 Clean up for Selection Screens
+REPORT rfduml00 MESSAGE-ID fr
+       NO STANDARD PAGE HEADING
+       LINE-SIZE 132.
+
+
+*------ Standard-Rahmentexte für Selektionsbild ------------------------
+INCLUDE rfdbrmac.
+
+
+*---------------------------------------------------------------------*
+* TABELLEN                                                            *
+*---------------------------------------------------------------------*
+TABLES: bhdgd,
+*        bsad,                                               "#EC *
+        bsec,
+*        bseg,
+        bsega,
+*        bsid,
+        kna1,
+        knb1,
+        knc1,
+        rfpdo,
+        rfpdo1,
+        rfpdo2,
+        rfsdo,
+        t001,
+        t005t,
+        t009.
+
+DATA: gs_bseg LIKE bseg.
+DATA: gs_bsid LIKE bsid.
+DATA: gs_bsad LIKE bsad.
+
+*S/4 Hana optimization                                     "2172020
+DATA ld_select TYPE string.
+DATA ld_count TYPE I.
+DATA lc_count(2).
+TYPES: BEGIN OF ty_umstz,
+  kunnr TYPE kunnr,
+  bukrs TYPE bukrs,
+  gjahr TYPE gjahr,
+  umstz TYPE umxxs.
+TYPES END OF ty_umstz.
+DATA: lt_umstz         TYPE STANDARD TABLE OF ty_umstz,
+      lt_column_order  TYPE adbc_column_tab,
+      lo_sql_statement TYPE REF TO cl_sql_statement,
+lr_umstz         TYPE REF TO DATA,
+      lo_result_set    TYPE REF TO cl_sql_result_set.
+
+*---------------------------------------------------------------------*
+* VARIABLEN                                                           *
+*---------------------------------------------------------------------*
+DATA:   bukzaehler   TYPE i,            "Anzahl Bukr pro Währung im Debi
+        cpdumsatz    LIKE knc1-um01u,
+
+        ph_line(255) TYPE c,
+        poper        LIKE t009b-poper, "Für Fkt. FIRST_DAY_IN_PERIOD_GET
+        satzart(1)   TYPE c,           "1= Normale Extrakt,2=CPD-Extrakt
+        skbez(132)   TYPE c,           "X = Ausgabefeld für Sako-Bez.
+        umstz_akont  LIKE knc1-um01u,  "Umsatz pro Abstimmkonto
+        umstz_bukrs  LIKE knc1-um01u,  "Umsatz pro Buchungskreis
+        umstz_kunnr  LIKE knc1-um01u,  "Umsatz pro Debitor (KonzVers.)
+        umstz_land1  LIKE knc1-um01u,  "Umsatz pro Land
+        umstz_waers  LIKE knc1-um01u,  "Umsatz pro WAERS im Debitor
+        umstz_max    LIKE knc1-um01u.
+*                     VALUE '99999999999999-',                    "AFLE
+        umstz_max = CL_AFLE_MAX_MIN=>GET_MAX_VAL_14_2_NO_FP( ).   "AFLE
+        umstz_max = umstz_max * -1.
+DATA:
+        xakont1      TYPE c,           "X = 1. Abstimmkonto eines Bukrs
+        xcpdsa1      TYPE c,           "X = Satzart 1 ausgegeben
+        "  ==> auch Satzart 2 ausgeben
+        xcoltotal    TYPE c,           "X = Kreditor ausgeben in Farbe
+        "    TOTAL INTENSIFIED OFF
+        xcpdtop      TYPE c,           "X = bei TOP OF PAGE die CPD-
+        "    Kontonummer wiederholen
+        xendsu       TYPE c,           "X = Endsummierung läuft
+        xland1       LIKE boole-boole, "X = 1. Land eines Bukrs
+        xsele        TYPE c,           "X = Mind. ein Satz selektiert
+        xnewbuk      TYPE c,           "X = 1. Satz eines neuen Bukrs
+        xnewkto      TYPE c,           "X = 1. Satz eines neuen Kontos
+        xtopzeile    TYPE c.           "X = AKONT im TOP-OF-PAGE ausgeb.
+
+
+*---------------------------------------------------------------------*
+* FELDLEISTEN                                                         *
+*---------------------------------------------------------------------*
+
+*------ Adressinformationen zu CPD -------------------------------------
+DATA: BEGIN OF cpdinfo,
+        name1    LIKE bsec-name1,
+        slsh1(3) TYPE c,
+        name2    LIKE bsec-name2,
+        slsh2(3) TYPE c,
+        stras    LIKE bsec-stras,
+        slsh3(3) TYPE c,
+        pstlz    LIKE bsec-pstlz,
+        ort01    LIKE bsec-ort01,
+        slsh4(3) TYPE c,
+        regio    LIKE bsec-regio,
+      END   OF cpdinfo.
+
+*------ Daten, normale Debitoren (Satzart 1) ---------------------------
+DATA: BEGIN OF datn,
+        waers(5) TYPE c,             "Hauswaehrung
+        umstz(8) TYPE p,             "Umsatz pro Debitor im Bukrs
+      END   OF datn.
+
+*------ Daten aus SKA1 -------------------------------------------------
+DATA: BEGIN OF iska1.
+    INCLUDE STRUCTURE ska1.
+DATA: END   OF iska1.
+
+*------ Daten aus SKAT -------------------------------------------------
+DATA: BEGIN OF iskat.
+    INCLUDE STRUCTURE skat.
+DATA: END   OF iskat.
+
+*------ Variable Daten für Mikrofiche-Zeile (Normalversion , Sort 1) ---
+DATA: BEGIN OF mifn1,
+        bukrs LIKE knb1-bukrs,
+        akont LIKE knb1-akont,
+        kunnr LIKE kna1-kunnr,
+      END   OF mifn1.
+
+*------ Variable Daten für Mikrofiche-Zeile (Normalversion , Sort 2) ---
+DATA: BEGIN OF mifn2,
+        bukrs LIKE knb1-bukrs,
+        kunnr LIKE kna1-kunnr,
+      END   OF mifn2.
+
+*------ Variable Daten für Mikrofiche-Zeile (Normalversion , Sort 2) ---
+DATA: BEGIN OF mifn3,
+        bukrs     LIKE knb1-bukrs,
+        umstz     TYPE AFLEXC16,  "AFLE enablement original (16)type c,
+      END   OF mifn3.
+
+*------ Variable Daten für Mikrofiche-Zeile (Normalversion , Sort 4) ---
+DATA: BEGIN OF mifn4,
+        bukrs LIKE knb1-bukrs,
+        land1 LIKE kna1-land1,
+        pstlz LIKE kna1-pstlz,
+        kunnr LIKE kna1-kunnr,
+      END   OF mifn4.
+
+*------ Variable Daten für Mikrofiche-Zeile (Konzernversion , Sort 1) --
+DATA: BEGIN OF mifk1,
+        akont LIKE knb1-akont,
+        kunnr LIKE kna1-kunnr,
+        bukrs LIKE knb1-bukrs,
+      END   OF mifk1.
+
+*------ Variable Daten für Mikrofiche-Zeile (Konzernversion , Sort 2) --
+DATA: BEGIN OF mifk2,
+        kunnr LIKE kna1-kunnr,
+        bukrs LIKE knb1-bukrs,
+      END   OF mifk2.
+
+*------ Variable Daten für Mikrofiche-Zeile (Konzernversion , Sort 3) --
+DATA: BEGIN OF mifk3,
+        umstz     TYPE AFLEXC16,  "AFLE enablement original (16)type c,
+      END   OF mifk3.
+
+*------ Variable Daten für Mikrofiche-Zeile (Konzernversion , Sort 4) --
+DATA: BEGIN OF mifk4,
+        land1 LIKE kna1-land1,
+        pstlz LIKE kna1-pstlz,
+        kunnr LIKE kna1-kunnr,
+        bukrs LIKE knb1-bukrs,
+      END   OF mifk4.
+
+*------ Kopfzeile am Seitenanfang --------------------------------------
+DATA: BEGIN OF pgheader,
+        text(18)  TYPE c,
+        ' ',
+        mnlow(2)  TYPE c,
+        ' - ',
+        mnhigh(2) TYPE c,
+        ' ',
+        year(4)   TYPE c,
+      END   OF pgheader.
+
+
+*---------------------------------------------------------------------*
+* INTERNE TABELLEN                                                    *
+*---------------------------------------------------------------------*
+
+*------ Speichern der relevanten buchungskreisabh. Daten ---------------
+DATA: BEGIN OF buktab OCCURS 10,
+        bukrs LIKE t001-bukrs,
+        waers LIKE t001-waers,
+        ktopl LIKE t001-ktopl,
+        tag01 LIKE sy-datum,      "Erster Tag der Berichtsmonate
+        tag99 LIKE sy-datum,      "Letzter Tag der Berichtsmonate
+      END   OF buktab.
+
+*------ Speichern der relevanten buchungskreisabh. Daten ---------------
+DATA: BEGIN OF endsutab OCCURS 10,
+        waers LIKE t001-waers,
+        bukrs LIKE t001-bukrs,
+        umstz LIKE knc1-um01u,
+      END   OF endsutab.
+
+*------ Zu extrahierende Daten eines Debitors merken -------------------
+DATA: BEGIN OF extracttab OCCURS 10,
+        bukrs LIKE knb1-bukrs,
+        akont LIKE knb1-akont,
+        waers LIKE datn-waers,
+        umstz LIKE datn-umstz,
+      END   OF extracttab.
+
+*------ Speicherung des Geschäftsjahres für Funktionsbaustein ----------
+*------ 'BUILD_DEFAULT_YEAR'                                  ----------
+DATA: BEGIN OF gejahr_tab OCCURS 2,
+        sign(1)   TYPE c,
+        option(2) TYPE c,
+        low       LIKE knc1-gjahr,
+        high      LIKE knc1-gjahr,
+      END   OF gejahr_tab.
+
+*------ Währungssummen pro Konto ---------------------------------------
+DATA: BEGIN OF waerstab OCCURS 3,
+        waers LIKE t001-waers,
+        umstz LIKE knc1-um01u,
+      END   OF waerstab.
+
+* historical data
+DATA gv_inserted TYPE boole_d.
+*---------------------------------------------------------------------*
+* PARAMETER UND SELECT-OPTIONS                                        *
+*---------------------------------------------------------------------*
+begin_of_block 1.
+SELECT-OPTIONS:
+  b_period FOR rfpdo2-kumlbper       "Berichtsmonate
+               NO-EXTENSION,
+  kt_umstz FOR rfsdo-kumlumst.       "Umsatz des Kontos
+PARAMETERS  pa_stida TYPE hist_date DEFAULT sy-datum MODIF ID std. "Stichtag
+end_of_block 1.
+
+begin_of_block 2.
+PARAMETERS:
+  konzvers LIKE rfpdo-ksldkonz,   "Konzernversion
+  kt_sort  LIKE rfpdo2-kumlsort   "Kontensortierung
+                DEFAULT '1'      "1=AKONT ; 2=KUNNR ; 3=Umsatz(abst.)
+                NO-DISPLAY,
+  vd_stufe LIKE rfpdo-dsldvdst    "Verdichtungsstufe
+                      DEFAULT '0' NO-DISPLAY,
+  p_nsum   LIKE rfpdo3-allgnsum,
+  gejahr   LIKE t009b-bdatj,      "Geschäftsjahr
+  cpd_info LIKE rfpdo-dsldcpda,   "CPD-Daten ausgeben
+  kt_ums0  LIKE rfpdo2-kumlums0,  "Konten ohne Umsatz?
+  title    LIKE rfpdo1-allgline,  "Zusatzueberschrift
+  listsep  LIKE rfpdo-allglsep,   "Listseparation
+  mikfiche LIKE rfpdo-allgmikf,   "Mikrofiche-Information
+  xumrechn LIKE rfpdo2-kumlxumr.  "Währungsumrechnung durchführen
+SELECTION-SCREEN BEGIN OF LINE.
+*selection-screen comment 1(30)  text-sl1.                      "N740800
+SELECTION-SCREEN COMMENT 1(30)  TEXT-sl1 FOR FIELD er_waers. "N740800
+PARAMETERS: er_waers LIKE rfpdo2-kumlwaer,
+            er_kurst LIKE rfpdo2-kumlkrtp DEFAULT 'M',
+            er_datum LIKE rfpdo2-kumlkrdt DEFAULT sy-datum.
+SELECTION-SCREEN END   OF LINE.
+
+* Selection Parameter for Layout for Deatailed List
+SELECTION-SCREEN:
+* header
+ BEGIN OF LINE,
+ COMMENT 1(20) TEXT-002,
+ COMMENT pos_low(20) TEXT-003 FOR FIELD p_vari,
+ END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT (30) TEXT-004
+                  FOR FIELD p_vari,
+                  POSITION POS_LOW.
+* variant field
+PARAMETERS p_vari LIKE disvariant-variant.                  "#EC *
+* push button
+SELECTION-SCREEN: PUSHBUTTON 55(15) TEXT-001
+                  USER-COMMAND com1.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN: COMMENT (30) TEXT-005
+                  FOR FIELD p_vari2,
+                  POSITION POS_LOW.
+* variant field
+PARAMETERS p_vari2 LIKE disvariant-variant.                 "#EC *
+* push button
+SELECTION-SCREEN: PUSHBUTTON 55(15) TEXT-001
+                  USER-COMMAND com2.
+SELECTION-SCREEN END OF LINE.
+end_of_block 2.
+
+
+*---------------------------------------------------------------------*
+* FELDGRUPPEN                                                         *
+*---------------------------------------------------------------------*
+FIELD-GROUPS: header,
+              daten,
+              cpddaten.
+
+INSERT kna1-kunnr
+       knb1-bukrs
+       knb1-akont
+       datn-waers
+       datn-umstz
+       kna1-land1
+       kna1-pstlz
+       satzart
+       bsec-empfg
+       umstz_kunnr
+INTO header.
+
+INSERT kna1-name1
+       kna1-stras
+       kna1-ort01
+       kna1-regio
+       kna1-xcpdk
+INTO daten.
+
+INSERT bsec-name1                                           "CPD Name 1
+       bsec-name2                                           "CPD Name 2
+       bsec-land1
+       bsec-stras                 "CPD Strasse
+       bsec-pstlz                 "CPD Postleitzahl
+       bsec-ort01                 "CPD Ort
+       bsec-regio                      "CPD Region
+       bsega-dmshb                "CPD Beträge, die den Umsatz betreffen
+INTO cpddaten.
+
+*-------------Begin Of Data Declaration for ALV------------------------*
+*    Type Pool of ALV specific data types
+TYPE-POOLS: slis.
+TYPE-POOLS: kkblo.                                          "1178818
+
+TABLES: sscrfields.
+
+*    Internal Tables
+*    Table for displaying the output through ALV
+DATA gt_outtab TYPE STANDARD TABLE OF foap_s_rfduml00
+                         WITH HEADER LINE.
+* Start of changes on 21 June 2004 : C5056175
+DATA gt_outtab1 TYPE STANDARD TABLE OF foap_s_rfduml00_list
+                          WITH HEADER LINE.
+* End of changes on 21 June 2004 : C5056175
+DATA gt_outtab_summ TYPE STANDARD TABLE OF foap_s_rfduml00
+                              WITH HEADER LINE.
+"OUTPUT TABLE
+
+DATA: gs_outtab TYPE foap_s_rfduml00.
+
+* Start of changes on 2 June 2004 : C5056175
+*-------Header Output tables for Hierarchical disp--------------------*
+DATA: gt_output_alv_h TYPE foap_s_rfduml00 OCCURS 0 WITH HEADER LINE,
+                                                            "#EC *
+      gs_output_alv_h TYPE foap_s_rfduml00.
+* Start of changes on 18 June 2004 : C5056175
+*-------Item Output tables for Hierarchical display-------------------*
+DATA: gt_output_alv_i TYPE STANDARD TABLE OF foap_s_rfduml00_list,
+      gs_output_alv_i TYPE                   foap_s_rfduml00_list.
+* End of changes on 18 June 2004 : C5056175
+* End of changes on 2 June 2004 : C5056175
+
+*    Variables
+DATA: gv_repid   TYPE sy-repid,                 "Name of Calling Program
+      gv_save(1) TYPE c,                        "Layout Save variable
+      gv_exit(1) TYPE c,                        "Exit option
+      gs_variant TYPE disvariant.               "Variant structure
+
+DATA: gd_bukrs LIKE bsid-bukrs.                             "1178818
+
+DATA: gt_top_of_page TYPE slis_t_listheader. "Table for TOP-OF-PAGE
+* Start of changes on 7 June 2004 : C5056175
+
+CONSTANTS: gc_formname_top_of_page1 TYPE slis_alv_event-form
+           VALUE 'TOP_OF_PAGE1',
+
+           gc_formname_end_of_list1 TYPE slis_alv_event-form
+           VALUE 'END_OF_LIST1'.
+
+
+* End of changes on 7 June 2004 : C5056175
+*    Constants
+CONSTANTS: gc_customer(8) TYPE c VALUE 'CUSTOMER'.          "#EC *
+
+CONSTANTS:
+  gc_outtab           TYPE dd02l-tabname VALUE 'GT_OUTTAB', "#EC *
+
+  gc_structname       TYPE dd02l-tabname VALUE 'FOAP_S_RFDUML00',
+  "Structure for output table
+  gc_save             TYPE c  VALUE 'A',    " For Layout save option
+  gc_x                TYPE c    VALUE 'X',  " Checked Condition of a flag
+  gc_listheading_type TYPE c VALUE 'A', "List Heading type 'Action'
+  gc_handle1          TYPE slis_handl VALUE 'HAN1', " Handle for List1
+* Start of changes on 21 June 2004 : C5056175
+  gc_handle2          TYPE slis_handl VALUE 'HAN2', " Handle for List1
+  gc_offset           TYPE dd03p-outputlen VALUE '10', " Offset from name
+  gc_offset1          TYPE dd03p-outputlen VALUE '5', " Offset from name
+* End of changes on 21 June 2004 : C5056175
+* Start of changes on 8 June : 2004
+  gc_output_h         TYPE dd02l-tabname VALUE 'GT_OUTPUT_ALV_H',
+  gc_output_i         TYPE dd02l-tabname VALUE 'GT_OUTPUT_ALV_I',
+
+  gc_it_outtab_h      TYPE dd02l-tabname VALUE 'IT_OUTTAB',
+  gc_it_outtab_i      TYPE dd02l-tabname VALUE 'IT_OUTTAB1'.
+
+CONSTANTS: gc_top_of_page      TYPE slis_alv_event-form
+                                 VALUE 'TOP_OF_PAGE_SUM',
+           gc_top_of_page_sum1 TYPE slis_alv_event-form
+                            VALUE 'TOP_OF_PAGE_SUM1'.
+
+* End of changes on 8 June : 2004
+CONSTANTS: gc_handle_pf_status TYPE slis_formname
+                            VALUE 'HANDLE_PF_STATUS'.
+
+
+*---------------------------------------------------------------------*
+* INITIALIZATION                                                      *
+*---------------------------------------------------------------------*
+INITIALIZATION.
+
+*------ Titel für Standardfenster auf Selektionsbild holen -------------
+  get_frame_title: 1,2.
+
+*------ Geschäftsjahr vorschlagen --------------------------------------
+  CALL FUNCTION 'BUILD_DEFAULT_YEAR'
+    TABLES
+      xgjahr = gejahr_tab.
+  gejahr = gejahr_tab-low.
+
+*------ Berichtsmonate vorschlagen: 1 bis 16 ---------------------------
+  CALL FUNCTION 'BUILD_DEFAULT_PERIOD'
+    TABLES
+      xmonat = b_period.
+
+
+* ALV
+  CLEAR: gt_outtab, gt_outtab_summ.
+* The report Name
+  gv_repid = sy-repid.
+* Set Options: save variants userspecific or general
+  gv_save = gc_save.
+*  Initialise the Variant table.
+  CLEAR gs_variant.
+  gs_variant-report = gv_repid.
+
+* Get the F4 values for the parameter for report layout variant
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_vari.
+  PERFORM reuse_alv_get_variant USING    gv_repid
+                                         gc_handle1
+                                CHANGING p_vari.
+
+* Check for the existence of layout variant, if input by user
+AT SELECTION-SCREEN ON p_vari.
+  PERFORM variant_existence_check USING    gc_handle1
+                                  CHANGING p_vari.
+
+  IF sscrfields-ucomm = 'COM1'.
+    gs_variant-handle = gc_handle1.
+    PERFORM set_output_layout       TABLES   gt_outtab
+                                    USING    gv_repid.
+    CLEAR   gt_outtab.
+    REFRESH gt_outtab.
+  ENDIF.
+
+* Get the F4 values for the parameter for report layout variant
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_vari2.
+  PERFORM reuse_alv_get_variant USING    gv_repid
+                                         gc_handle2
+                                CHANGING p_vari2.
+
+* Check for the existence of layout variant, if input by user
+AT SELECTION-SCREEN ON p_vari2.
+  PERFORM variant_existence_check USING    gc_handle2
+                                  CHANGING p_vari2.
+
+  IF sscrfields-ucomm = 'COM2'.
+    gs_variant-handle = gc_handle2.
+    PERFORM set_hierarch_output_layout  TABLES   gt_output_alv_h
+                                                 gt_output_alv_i.
+    CLEAR   gt_output_alv_h.
+    REFRESH gt_output_alv_h.
+    CLEAR   gt_output_alv_i.
+    REFRESH gt_output_alv_i.
+  ENDIF.
+
+
+*---------------------------------------------------------------------*
+* AT SELECTION-SCREEN                                                 *
+*---------------------------------------------------------------------*
+
+*------ Kontensortierung: Eingabe im erlaubten Intervall? --------------
+AT SELECTION-SCREEN ON kt_sort.
+  IF kt_sort >= '1' AND kt_sort <= '4'.                   "#EC PORTABLE
+    "Richtige Eingabe
+  ELSE.
+    MESSAGE e112.
+  ENDIF.
+
+*------ Verdichtungsstufe: Eingabe im erlaubten Intervall? -------------
+AT SELECTION-SCREEN ON vd_stufe.
+  IF vd_stufe >= '0' AND vd_stufe <= '3'.                 "#EC PORTABLE
+    "Richtige Eingabe
+  ELSE.
+    MESSAGE e106.
+  ENDIF.
+
+*------ Berichtsmonate: Eingabe im erlaubten Intervall (01 bis 16)? ----
+AT SELECTION-SCREEN ON b_period.
+  CALL FUNCTION 'BUILD_DEFAULT_PERIOD'
+    TABLES
+      xmonat = b_period.
+
+*------ CPD-Daten werden nur bei Verdichtungsstufe 0 ausgegeben --------
+AT SELECTION-SCREEN.
+  IF cpd_info <> space.
+    IF vd_stufe = '0'.
+      cpd_info = 'X'.
+    ELSE.
+      SET CURSOR FIELD 'CPD_INFO'.
+      MESSAGE e108.
+    ENDIF.
+  ENDIF.
+
+*------ Bei Konzernversion und Sortierung 3 muß Umrechnung in     ------
+*------ Ergebniswährung durchgeführt werden                       ------
+  IF konzvers = 'X'
+  AND kt_sort = '3'
+  AND xumrechn = space.
+    MESSAGE e293.
+  ENDIF.
+
+*------ Bei Umrechnung in ErgWährung müssen die Angaben gepflegt sein --
+  IF xumrechn = 'X'.
+    IF er_waers IS INITIAL
+    OR er_kurst IS INITIAL
+    OR er_datum IS INITIAL.
+      SET CURSOR FIELD er_waers.
+      MESSAGE e294.
+    ENDIF.
+  ENDIF.
+
+  IF sy-batch EQ space AND sy-tcode NS 'AUDIT'.
+    CLEAR pa_stida.
+  ENDIF.
+
+  AT SELECTION-SCREEN OUTPUT.
+    LOOP AT SCREEN.
+      IF SCREEN-GROUP1 = 'STD' AND sy-tcode ns 'AUDIT'.
+        screen-active = 0.
+        MODIFY SCREEN.
+      ENDIF.
+    ENDLOOP.
+
+*---------------------------------------------------------------------*
+* START-OF-SELECTION                                                  *
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+*------ Kopfzeile am Seitenanfang zusammenfügen ------------------------
+  pgheader-text   = TEXT-hd1.
+* Begin of note 2850668
+  IF b_period-low+1(1) = ' '.
+    LOOP AT b_period.
+      b_period-low+1(1) = b_period-low(1).
+      b_period-low(1) = 0.
+      MODIFY b_period TRANSPORTING low.
+    ENDLOOP.
+  ENDIF.
+  IF b_period-high+1(1) = ' '.
+    LOOP AT b_period.
+      b_period-high+1(1) = b_period-high(1).
+      b_period-high(1) = 0.
+      MODIFY b_period TRANSPORTING high.
+    ENDLOOP.
+  ENDIF.
+* End of note  2850668
+  pgheader-mnlow  = b_period-low.
+  pgheader-mnhigh = b_period-high.
+  pgheader-year   = gejahr.
+
+  IF vd_stufe NE '0'.
+    vd_stufe = '0'.
+  ENDIF.
+  IF kt_sort NE '1'.
+    kt_sort = '1'.
+  ENDIF.
+
+  IF pa_stida IS INITIAL or pa_stida > sy-datum OR ( sy-tcode ns 'AUDIT'  AND sy-batch ne abap_true ).
+    pa_stida = sy-datum.
+  ENDIF.
+
+* Historical master data: Fill buffer of cl_historical:data with
+* relevant change documents
+  IF pa_stida < sy-datum.
+    CALL METHOD cl_historical_data=>preread_debi
+      EXPORTING
+        iv_date     = pa_stida
+        ir_debi     = dd_kunnr[]
+        ir_bukrs    = dd_bukrs[]
+        iv_sel_kna1 = 'X'
+        iv_sel_knb1 = 'X'
+        .
+  ENDIF.
+*---------------------------------------------------------------------*
+* GET KNA1                                                            *
+*---------------------------------------------------------------------*
+  GET kna1.
+  CLEAR   umstz_kunnr.
+  CLEAR   extracttab.
+  REFRESH extracttab.
+
+  IF pa_stida < sy-datum.
+    CLEAR gv_inserted.
+    CALL METHOD cl_historical_data=>recover_data
+      EXPORTING
+        iv_tabname  = 'KNA1'
+      IMPORTING
+        ev_inserted = gv_inserted
+      CHANGING
+        cs_data     = kna1
+        .
+    IF gv_inserted = 'X'.
+      REJECT.
+    ENDIF.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* GET KNB1                                                            *
+*---------------------------------------------------------------------*
+  GET knb1.
+
+  IF pa_stida < sy-datum.
+    clear gv_inserted.
+    CALL METHOD cl_historical_data=>recover_data
+      EXPORTING
+        iv_tabname  = 'KNB1'
+      IMPORTING
+        ev_inserted = gv_inserted
+      changing
+        cs_data     = knb1
+        .
+    CHECK gv_inserted NE 'X'.
+  ENDIF.
+*------ Feldleiste DATN initialisieren ---------------------------------
+  CLEAR   datn.
+
+*------ Felder von DATN aus BUKTAB füllen ------------------------------
+  IF buktab-bukrs <> knb1-bukrs.
+    LOOP AT buktab WHERE bukrs = knb1-bukrs.
+      EXIT.
+    ENDLOOP.
+
+*------ Eintrag in BUKTAB hinzufügen -----------------------------------
+    IF sy-subrc <> 0.
+      SELECT SINGLE * FROM t001 WHERE bukrs = knb1-bukrs.
+      IF sy-subrc <> 0.
+        MESSAGE a101 WITH knb1-bukrs.
+      ENDIF.
+      MOVE-CORRESPONDING t001 TO buktab.
+
+*------ Ersten Kalendertag der Berichtsmonate ermitteln ----------------
+      IF cpd_info = 'X'.
+        poper = b_period-low.
+        CALL FUNCTION 'FIRST_DAY_IN_PERIOD_GET'
+          EXPORTING
+            i_gjahr        = gejahr        "Geschaeftsjahr
+            i_periv        = t001-periv  "Version der Periodenermittlung
+            i_poper        = poper         "Erste Berichtsperiode
+          IMPORTING
+            e_date         = buktab-tag01
+          EXCEPTIONS
+            input_false    = 1
+            t009_notfound  = 1
+            t009b_notfound = 1.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE 'A' NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+      ELSE.
+        CLEAR buktab-tag01.
+      ENDIF.
+
+*------ Letzten Kalendertag der Berichtsmonate ermitteln ---------------
+      IF cpd_info = 'X'.
+        IF t009-periv <> t001-periv.
+          SELECT SINGLE * FROM t009 WHERE periv = t001-periv.
+          IF sy-subrc <> 0.
+            MESSAGE a295 WITH t001-periv t001-bukrs.
+          ENDIF.
+        ENDIF.
+        poper = t009-anzbp + t009-anzsp.
+        IF b_period-high < poper.                         "#EC PORTABLE
+          poper = b_period-high.
+        ENDIF.
+        CALL FUNCTION 'LAST_DAY_IN_PERIOD_GET'
+          EXPORTING
+            i_gjahr        = gejahr        "Geschaeftsjahr
+            i_periv        = t001-periv  "Version der Periodenermittlung
+            i_poper        = poper         "Letzte Berichtsperiode
+          IMPORTING
+            e_date         = buktab-tag99
+          EXCEPTIONS
+            input_false    = 1
+            t009_notfound  = 1
+            t009b_notfound = 1.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE 'A' NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+      ELSE.
+        CLEAR buktab-tag99.
+      ENDIF.
+
+      APPEND buktab.
+    ENDIF.
+  ENDIF.
+  IF xumrechn = 'X'.
+    datn-waers = er_waers.
+  ELSE.
+    datn-waers = buktab-waers.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* GET KNC1                                                            *
+*---------------------------------------------------------------------*
+* Hana optimization                                        "2172020
+* select um01u + um03u + ... + um016u as umstz from knc1
+* where kunnr in dd_kunnr
+* and bukrs in dd_bukrs
+*   and gjahr = gejahr.
+  CLEAR: ld_select, ld_count.
+  IF lt_umstz IS INITIAL.
+    WHILE ld_count < 16.
+      ADD 1 TO ld_count.
+      IF ld_count < 10.
+        lc_count+1 = ld_count.
+        lc_count(1) = '0'.
+      ELSE.
+        lc_count = ld_count.
+      ENDIF.
+      IF lc_count IN b_period.
+        CONCATENATE ld_select ' + um' lc_count 'u ' INTO ld_select.
+      ENDIF.
+    ENDWHILE.
+    SHIFT ld_select BY 2 PLACES LEFT.
+    CONCATENATE 'SELECT KUNNR, BUKRS, GJAHR, ' ld_select INTO ld_select.
+    CONCATENATE ld_select ' AS UMSTZ FROM KNC1' INTO ld_select.
+    TYPE-POOLS: rsds.
+    DATA: ld_ranges TYPE rsds_trange,
+          ld_where  TYPE rsds_twhere.
+    APPEND INITIAL LINE TO ld_ranges ASSIGNING FIELD-SYMBOL(<ranges>).
+    APPEND INITIAL LINE TO <ranges>-frange_t ASSIGNING FIELD-SYMBOL(<range>).
+    <ranges>-tablename = 'KNC1'.
+    <range>-fieldname = 'BUKRS'.
+    LOOP AT dd_bukrs ASSIGNING FIELD-SYMBOL(<bukrs>).
+      APPEND INITIAL LINE TO <range>-selopt_t ASSIGNING FIELD-SYMBOL(<selopt>).
+      MOVE-CORRESPONDING <bukrs> TO <selopt>.
+      IF <selopt>-sign = 'I'.                                    "2928977
+        IF <selopt>-option = 'EQ'.                               "2928977
+          <selopt>-option = '='.                                 "2928977
+        ENDIF.                                                   "2928977
+        IF <selopt>-option = 'NE'.                               "2928977
+          <selopt>-option = '<>'.                                "2928977
+        ENDIF.                                                   "2928977
+      ELSE.                                                      "2928977
+        IF <selopt>-option = 'EQ'.                               "2928977
+          <selopt>-option = '<>'.                                "2928977
+        ENDIF.                                                   "2928977
+        IF <selopt>-option = 'NE'.                               "2928977
+          <selopt>-option = '='.                                 "2928977
+        ENDIF.                                                   "2928977
+      ENDIF.                                                     "2928977
+    ENDLOOP.
+    APPEND INITIAL LINE TO <ranges>-frange_t ASSIGNING <range>.
+    <range>-fieldname = 'KUNNR'.
+    LOOP AT dd_kunnr ASSIGNING FIELD-SYMBOL(<kunnr>).
+      APPEND INITIAL LINE TO <range>-selopt_t ASSIGNING <selopt>.
+      MOVE-CORRESPONDING <kunnr> TO <selopt>.
+      IF <selopt>-sign = 'I'.                                    "2928977
+        IF <selopt>-option = 'EQ'.                               "2928977
+          <selopt>-option = '='.                                 "2928977
+        ENDIF.                                                   "2928977
+        IF <selopt>-option = 'NE'.                               "2928977
+          <selopt>-option = '<>'.                                "2928977
+        ENDIF.                                                   "2928977
+      ELSE.                                                      "2928977
+        IF <selopt>-option = 'EQ'.                               "2928977
+          <selopt>-option = '<>'.                                "2928977
+        ENDIF.                                                   "2928977
+        IF <selopt>-option = 'NE'.                               "2928977
+          <selopt>-option = '='.                                 "2928977
+        ENDIF.                                                   "2928977
+      ENDIF.                                                     "2928977
+    ENDLOOP.
+    CALL FUNCTION 'FREE_SELECTIONS_RANGE_2_WHERE'
+      EXPORTING
+        field_ranges  = ld_ranges
+      IMPORTING
+        where_clauses = ld_where.
+    CONCATENATE ld_select ' WHERE MANDT = ''' sy-mandt ''''    "2767799
+                                                INTO ld_select."2767799
+    CLEAR ld_count.
+    LOOP AT ld_where ASSIGNING FIELD-SYMBOL(<wheres>) WHERE tablename = 'KNC1'.
+      ADD 1 TO ld_count.
+      IF ld_count = 1.
+        CONCATENATE ld_select ' AND ' INTO ld_select.
+      ENDIF.
+      LOOP AT <wheres>-where_tab ASSIGNING FIELD-SYMBOL(<where>).
+        CONCATENATE ld_select ' ' <where> INTO ld_select SEPARATED BY space.
+      ENDLOOP.
+    ENDLOOP.
+    CONCATENATE ld_select ' AND GJAHR = ''' gejahr ''''        "2767799
+                                            INTO ld_select.    "2767799
+    CONDENSE ld_select.
+*    Moved above to avoid issues with usage of NE in CC or CUST
+*    REPLACE ALL OCCURRENCES OF 'EQ' IN ld_select WITH '='.
+*    REPLACE ALL OCCURRENCES OF 'NE' IN ld_select WITH '<>'.   "2637695
+    CREATE OBJECT lo_sql_statement.
+    GET REFERENCE OF lt_umstz INTO lr_umstz.
+    lo_result_set = lo_sql_statement->execute_query( statement = ld_select ).
+
+    lo_result_set->set_param_table(
+    itab_ref = lr_umstz
+    ).
+
+    lo_result_set->next_package( ).
+
+    SORT lt_umstz BY KUNNR BUKRS.                              "2612106
+
+  ENDIF.
+
+  READ TABLE lt_umstz ASSIGNING FIELD-SYMBOL(<umstz>)
+    WITH KEY kunnr = knb1-kunnr
+             bukrs = knb1-bukrs
+    BINARY SEARCH.                                             "2612106
+  CHECK sy-subrc = 0.
+  datn-umstz = <umstz>-umstz.
+
+*  the following lines are now replaced                   "2172020
+*  by the SQL selection of all KNC1 above                 "2172020
+*  GET knc1.
+*  CHECK knc1-gjahr = gejahr.
+*
+**------ Umsatz innerhalb der Berichtsmonate ermitteln ------------------
+*  ADD knc1-um01u THEN knc1-um02u UNTIL knc1-um16u
+*      GIVING datn-umstz
+*      ACCORDING TO b_period.
+*end of S/4 Hana optimization                              "2172020
+
+
+*------ Umrechnung in Ergebniswährung durchführen ----------------------
+  IF xumrechn = 'X'.
+    IF buktab-waers <> er_waers.
+      IF NOT datn-umstz IS INITIAL.
+        CALL FUNCTION 'CONVERT_TO_FOREIGN_CURRENCY'
+          EXPORTING
+            date             = er_datum
+            foreign_currency = er_waers
+            local_amount     = datn-umstz
+            local_currency   = buktab-waers
+            type_of_rate     = er_kurst
+          IMPORTING
+            foreign_amount   = datn-umstz
+          EXCEPTIONS
+            no_rate_found    = 1
+            overflow         = 1.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE 'A' NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+      ENDIF.
+      datn-waers = er_waers.
+    ENDIF.
+  ENDIF.
+
+
+*---------------------------------------------------------------------*
+* GET KNB1 LATE                                                       *
+*---------------------------------------------------------------------*
+  GET knb1 LATE.
+
+*------ Gesamtumsatz pro Debitor ermitteln  ----------------------------
+*------ (Konzernversion in Ergebniswährung) ----------------------------
+  IF  konzvers = 'X'
+  AND xumrechn = 'X'.
+    umstz_kunnr = umstz_kunnr + datn-umstz.
+
+*------ Kontenumsatz pro Bukrs im selektierten Bereich? ----------------
+*------ (Normalversion, Konzernversion in Hauswährung)  ----------------
+  ELSE.
+    CHECK ( NOT kt_ums0 IS INITIAL OR NOT datn-umstz IS INITIAL )
+      AND ( datn-umstz IN kt_umstz ).
+  ENDIF.
+
+*------ Satz in Extrakttabelle schreiben -------------------------------
+  PERFORM extracttab_fuellen.
+
+
+*---------------------------------------------------------------------*
+* GET KNA1 LATE                                                       *
+*---------------------------------------------------------------------*
+  GET kna1 LATE.
+  PERFORM extracttab_in_extract.
+
+
+*---------------------------------------------------------------------*
+* END-OF-SELECTION                                                    *
+*---------------------------------------------------------------------*
+END-OF-SELECTION.
+
+*------ Kein Satz im Extrakt ==> Ende ----------------------------------
+*  if xsele = space.
+*    call function 'POPUP_NO_LIST'.
+*  endif.
+
+*------ Felder füllen für Batch-Heading --------------------------------
+  bhdgd-inifl = '0'.
+  CLEAR bhdgd-bukrs.
+  bhdgd-lines = sy-linsz.
+  bhdgd-uname = sy-uname.
+  bhdgd-repid = sy-repid.
+  bhdgd-line1 = sy-title.
+  bhdgd-line2 = title.
+  bhdgd-miffl = mikfiche.
+  bhdgd-separ = listsep.
+  bhdgd-domai = 'BUKRS'.
+  bhdgd-werte = '0000'.
+
+*------ Umsatzhöhe für Ausgabe Mikrofiche auf maximalen Wert -----------
+  IF  konzvers = 'X'
+  AND kt_sort  = '3'.
+    WRITE umstz_max CURRENCY er_waers TO mifk3-umstz.
+  ENDIF.
+
+*------ PH-Zeile für Endsummierung füllen und zentrieren ---------------
+  ph_line(35) = TEXT-t20.
+
+*------ Extrakt sortieren ----------------------------------------------
+  PERFORM extrakt_sortieren.
+
+*------ Verarbeitung des Extrakts --------------------------------------
+  LOOP.
+
+*-- AT FIRST -----------------------------------------------------------
+    IF kt_sort = '1'.
+      xtopzeile = 'X'.
+    ENDIF.
+
+*---------------------------------------------------------------------*
+* Normalversion                                                       *
+*---------------------------------------------------------------------*
+    IF konzvers = space.
+
+*-- AT NEW KNB1-BUKRS --------------------------------------------------
+      AT NEW knb1-bukrs.
+        xakont1 = 'X'.
+        xland1  = 'X'.
+        xnewbuk = 'X'.
+        CLEAR umstz_bukrs.
+        bhdgd-bukrs = knb1-bukrs.
+        bhdgd-werte = knb1-bukrs.
+        PERFORM new-section(rsbtchh0).
+      ENDAT.
+
+*-- AT NEW KNB1-AKONT --------------------------------------------------
+      AT NEW knb1-akont.
+        CLEAR umstz_akont.
+      ENDAT.
+
+*-- AT NEW KNA1-LAND1 --------------------------------------------------
+      AT NEW kna1-land1.
+        CLEAR umstz_land1.
+      ENDAT.
+
+*-- AT NEW KNA1-KUNNR --------------------------------------------------
+      AT NEW kna1-kunnr.
+        CLEAR xcpdsa1.
+      ENDAT.
+
+*-- AT NEW BSEC-EMPFG --------------------------------------------------
+      AT NEW bsec-empfg.
+        CLEAR cpdumsatz.
+      ENDAT.
+
+*-- AT DATEN -----------------------------------------------------------
+      AT daten.
+        CHECK satzart = '1'.
+        xtopzeile = 'X'.
+
+*------ Tabelle ENDSUTAB aufaddieren -----------------------------------
+        endsutab-waers = datn-waers.
+        endsutab-bukrs = knb1-bukrs.
+        endsutab-umstz = datn-umstz.
+        COLLECT endsutab.
+
+*------ Summe pro Abstimmkonto aufaddieren -----------------------------
+        umstz_akont = umstz_akont + datn-umstz.
+
+*------ Summe pro Land aufaddieren -------------------------------------
+        umstz_land1 = umstz_land1 + datn-umstz.
+
+*------ Summe pro Buchungskreis aufaddieren ----------------------------
+        umstz_bukrs = umstz_bukrs + datn-umstz.
+
+*------ Ausgabe der Daten pro Debitor ----------------------------------
+        CASE kt_sort.
+          WHEN '1'.
+            PERFORM daten_ausgeben_n1.
+          WHEN '2' OR '3'.
+            PERFORM daten_ausgeben_n23.
+          WHEN '4'.
+            PERFORM daten_ausgeben_n4.
+        ENDCASE.
+
+*------ Flag setzen, ob CPD-Daten ausgegeben werden sollen -------------
+        IF  cpd_info   = 'X'
+        AND kna1-xcpdk = 'X'.
+          xcpdtop = 'X'.          "bei TOP OF PAGE CPD-KotNr wiederholen
+          xcpdsa1 = 'X'.          "Satzart 1 ausgegeben -> Satzart 2
+          "kann auch ausgegeben werden
+        ENDIF.
+      ENDAT.
+
+*-- AT CPDDATEN --------------------------------------------------------
+      AT cpddaten.
+        CHECK satzart = '2'.
+        cpdumsatz = cpdumsatz + bsega-dmshb.
+      ENDAT.
+
+*-- AT END OF BSEC-EMPFG -----------------------------------------------
+      AT END OF bsec-empfg.
+        IF xcpdsa1 = 'X'.
+          PERFORM cpddaten_ausgeben_n.
+        ENDIF.
+      ENDAT.
+
+*-- AT END OF KNA1-KUNNR -----------------------------------------------
+      AT END OF kna1-kunnr.
+        CLEAR xcpdtop.
+      ENDAT.
+
+*-- AT END OF KNB1-AKONT -----------------------------------------------
+      AT END OF knb1-akont.
+        PERFORM akont_summe_n1.
+      ENDAT.
+
+*-- AT END OF KNA1-LAND1 -----------------------------------------------
+      AT END OF kna1-land1.
+        PERFORM land_summe_n4.
+      ENDAT.
+
+*-- AT END OF KNB1-BUKRS -----------------------------------------------
+      AT END OF knb1-bukrs.
+        xtopzeile = space.
+        CASE kt_sort.
+          WHEN '1'.
+            PERFORM bukrs_summe_n1.
+          WHEN '2' OR '3'.
+            PERFORM bukrs_summe_n23.
+          WHEN '4'.
+            PERFORM bukrs_summe_n4.
+        ENDCASE.
+      ENDAT.
+
+
+*---------------------------------------------------------------------*
+* Konzernversion                                                      *
+*---------------------------------------------------------------------*
+    ELSE.
+
+*-- AT NEW KNB1-AKONT --------------------------------------------------
+      AT NEW knb1-akont.
+        CLEAR   waerstab.
+        REFRESH waerstab.
+      ENDAT.
+
+*-- AT NEW KNA1-LAND1 --------------------------------------------------
+      AT NEW kna1-land1.
+        CLEAR   waerstab.
+        REFRESH waerstab.
+      ENDAT.
+
+*-- AT NEW KNA1-KUNNR --------------------------------------------------
+      AT NEW kna1-kunnr.
+        xnewkto = 'X'.
+      ENDAT.
+
+*-- AT NEW DATN-WAERS --------------------------------------------------
+      AT NEW datn-waers.
+        CLEAR umstz_waers.
+        CLEAR bukzaehler.
+      ENDAT.
+
+*-- AT NEW KNB1-BUKRS --------------------------------------------------
+      AT NEW knb1-bukrs.
+        CLEAR xcpdsa1.
+      ENDAT.
+
+*-- AT NEW BSEC-EMPFG --------------------------------------------------
+      AT NEW bsec-empfg.
+        CLEAR cpdumsatz.
+      ENDAT.
+
+*-- AT DATEN -----------------------------------------------------------
+      AT daten.
+        CHECK satzart = '1'.
+
+*------ Tabelle ENDSUTAB aufaddieren -----------------------------------
+        endsutab-waers = datn-waers.
+        endsutab-bukrs = knb1-bukrs.
+        endsutab-umstz = datn-umstz.
+        COLLECT endsutab.
+
+*------ Summe pro Währung aufaddieren ----------------------------------
+        umstz_waers = umstz_waers + datn-umstz.
+
+*------ Tabelle WAERSTAB aufaddieren -----------------------------------
+        waerstab-waers = datn-waers.
+        waerstab-umstz = datn-umstz.
+        COLLECT waerstab.
+
+*------ Daten pro Debitor ausgeben -------------------------------------
+        xtopzeile = 'X'.
+        bukzaehler = bukzaehler + 1.
+        CASE kt_sort.
+          WHEN '1'.
+            PERFORM daten_ausgeben_k1.
+          WHEN '2' OR '3'.
+            PERFORM daten_ausgeben_k23.
+          WHEN '4'.
+            PERFORM daten_ausgeben_k4.
+        ENDCASE.
+
+*------ Flag setzen, ob CPD-Daten ausgegeben werden sollen -------------
+        IF  cpd_info   = 'X'
+        AND kna1-xcpdk = 'X'.
+          xcpdtop = 'X'.          "bei TOP OF PAGE CPD-KotNr wiederholen
+          xcpdsa1 = 'X'.          "Satzart 1 ausgegeben -> Satzart 2
+          "kann auch ausgegeben werden
+        ENDIF.
+      ENDAT.
+
+*-- AT CPDDATEN --------------------------------------------------------
+      AT cpddaten.
+        CHECK satzart = '2'.
+        cpdumsatz = cpdumsatz + bsega-dmshb.
+      ENDAT.
+
+*-- AT END OF BSEC-EMPFG -----------------------------------------------
+      AT END OF bsec-empfg.
+        IF xcpdsa1 = 'X'.
+          PERFORM cpddaten_ausgeben_k.
+        ENDIF.
+      ENDAT.
+
+*-- AT END OF DATN-WAERS -----------------------------------------------
+      AT END OF datn-waers.
+        CASE kt_sort.
+          WHEN '1'.
+            PERFORM waers_summe_k1.
+          WHEN '2'.
+            PERFORM waers_summe_k23.
+          WHEN '3'.
+            PERFORM waers_summe_k23.
+          WHEN '4'.
+            PERFORM waers_summe_k4.
+        ENDCASE.
+      ENDAT.
+
+*-- AT END OF KNA1-KUNNR -----------------------------------------------
+      AT END OF kna1-kunnr.
+        CLEAR xcpdtop.
+      ENDAT.
+
+*-- AT END OF KNB1-AKONT -----------------------------------------------
+      AT END OF knb1-akont.
+        PERFORM akont_summe_k1.
+      ENDAT.
+
+*-- AT END OF KNA1-LAND1 -----------------------------------------------
+      AT END OF kna1-land1.
+        PERFORM land_summe_k4.
+      ENDAT.
+    ENDIF.         "IF KONZVERS = SPACE
+
+*-- AT LAST (für alle Sortierungen bzw. Versionen gleich) --------------
+    AT LAST.
+      CLEAR bhdgd-bukrs.
+      CLEAR bhdgd-werte.
+      PERFORM endsutab_ausgeben.
+    ENDAT.
+  ENDLOOP.
+
+* Setting the Display Variant for the list
+  gs_variant-variant    = p_vari.
+  gs_variant-report     = gv_repid.
+  gs_variant-handle     = gc_handle1.
+
+  IF p_nsum IS INITIAL.
+    IF cpd_info <> 'X'.
+      PERFORM display_alv_list.
+    ELSE.
+      gs_variant-variant    = p_vari2.
+      gs_variant-report     = gv_repid.
+      gs_variant-handle     = gc_handle2.
+      PERFORM display_hierachical_alv.
+    ENDIF.
+  ELSE.
+    PERFORM display_alv_summ.
+  ENDIF.
+
+
+*---------------------------------------------------------------------*
+* FORM AKONT_AUSGEBEN                                                 *
+*---------------------------------------------------------------------*
+* Abstimmkonto mit Bezeichnung ausgeben                               *
+*---------------------------------------------------------------------*
+FORM akont_ausgeben.                                        "#EC CALLED
+
+*------ Ausgabe nur bei Sortierung 1 (nach Abstimmkonto) ---------------
+  CHECK kt_sort = '1'.
+
+*------ Ausgabe nur bei bestimmten Verdichtungsstufen ------------------
+  CHECK ( konzvers = ' ' AND vd_stufe =  '0' )
+     OR ( konzvers = 'X' AND vd_stufe <= '2' ).           "#EC PORTABLE
+
+*------ Ausgabe nicht bei Endsummierungsblatt --------------------------
+  CHECK xtopzeile = 'X'.
+
+*------ Abstimmkonto mit Bezeichnung ausgeben --------------------------
+  IF buktab-bukrs <> knb1-bukrs.
+    LOOP AT buktab WHERE bukrs = knb1-bukrs.
+      EXIT.
+    ENDLOOP.
+  ENDIF.
+  CALL FUNCTION 'READ_SKA1'
+    EXPORTING
+      xktopl         = buktab-ktopl
+      xsaknr         = knb1-akont
+    IMPORTING
+      xska1          = iska1
+      xskat          = iskat
+    EXCEPTIONS
+      key_incomplete = 1
+      not_found      = 1
+      not_authorized = 2.
+  IF sy-subrc = 0.
+    IF iskat-txt50 = space.
+      skbez = iskat-txt20.
+    ELSE.
+      skbez = iskat-txt50.
+    ENDIF.
+  ELSE.
+    CLEAR skbez.
+  ENDIF.
+ENDFORM.                    "AKONT_AUSGEBEN
+
+*eject
+*---------------------------------------------------------------------*
+* FORM AKONT_SUMME_K1                                                 *
+*---------------------------------------------------------------------*
+* Summe pro Abstimmkonto ausgeben (Konzernversion, Sortierung 1)      *
+*---------------------------------------------------------------------*
+FORM akont_summe_k1.
+
+  CHECK vd_stufe = '2'.                                   "#EC PORTABLE
+  SORT waerstab BY waers.
+  LOOP AT waerstab.
+    MOVE knb1-akont TO gs_outtab-recon_account.
+    MOVE waerstab-waers TO gs_outtab-currency.
+    MOVE waerstab-umstz TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDLOOP.
+
+ENDFORM.                    "AKONT_SUMME_K1
+
+*---------------------------------------------------------------------*
+* FORM AKONT_SUMME_N1                                                 *
+*---------------------------------------------------------------------*
+* Summe pro Abstimmkonto ausgeben (Normalversion, Sortierung 1)       *
+*---------------------------------------------------------------------*
+FORM akont_summe_n1.
+
+* For summazrization level 1 move data into the output table
+  CHECK vd_stufe = '1'.                                   "#EC PORTABLE
+  MOVE knb1-bukrs TO gs_outtab-company_code.
+  MOVE knb1-akont TO gs_outtab-recon_account.
+  MOVE datn-waers TO gs_outtab-currency.
+  MOVE umstz_akont TO gs_outtab-sales.
+  APPEND gs_outtab TO gt_outtab.
+  CLEAR gs_outtab.
+
+ENDFORM.                    "AKONT_SUMME_N1
+
+*---------------------------------------------------------------------*
+* FORM BUKRS_SUMME_N1                                                 *
+*---------------------------------------------------------------------*
+* Buchungskreissumme ausgeben (Normalversion, Sortierung 1)           *
+*---------------------------------------------------------------------*
+FORM bukrs_summe_n1.
+
+  CHECK vd_stufe = '2'.                                   "#EC PORTABLE
+  MOVE  knb1-bukrs TO gs_outtab-company_code.
+  MOVE datn-waers TO gs_outtab-currency.
+  MOVE umstz_bukrs TO gs_outtab-sales.
+  APPEND gs_outtab TO gt_outtab.
+  CLEAR gs_outtab.
+
+ENDFORM.                    "BUKRS_SUMME_N1
+
+*---------------------------------------------------------------------*
+* FORM BUKRS_SUMME_N23                                                *
+*---------------------------------------------------------------------*
+* Buchungskreissumme ausgeben (Normalversion, Sortierung 2 und 3)     *
+*---------------------------------------------------------------------*
+FORM bukrs_summe_n23.
+
+  CHECK vd_stufe = '1'.                                   "#EC PORTABLE
+  MOVE:
+  knb1-bukrs TO gs_outtab-company_code,
+  datn-waers TO gs_outtab-currency,
+  umstz_bukrs TO gs_outtab-sales.
+  APPEND gs_outtab TO gt_outtab.
+  CLEAR gs_outtab.
+
+ENDFORM.                    "BUKRS_SUMME_N23
+
+*---------------------------------------------------------------------*
+* Form  CPD_TO_EXTRACT                                                *
+*---------------------------------------------------------------------*
+* CPD-Sätze in den Extrakt stellen                                    *
+*---------------------------------------------------------------------*
+FORM cpd_to_extract.
+  CHECK gs_bsid-xcpdd = 'X'.
+
+*------ Belegsegment nachlesen -----------------------------------------
+  SELECT SINGLE * FROM bseg INTO gs_bseg
+                            WHERE bukrs = gs_bsid-bukrs
+                              AND belnr = gs_bsid-belnr
+                              AND gjahr = gs_bsid-gjahr
+                              AND buzei = gs_bsid-buzei.
+  CHECK sy-subrc = 0.                                       "1410812
+  CHECK gs_bseg-xcpdd = 'X'.              "CPD-Daten?
+  CHECK gs_bseg-xumsw = 'X'.              "Beleg umsatzwirksam?
+  IF gs_bseg-shkzg = 'S'.
+    bsega-dmshb = gs_bseg-dmbtr.
+  ELSE.
+    bsega-dmshb = gs_bseg-dmbtr * -1.
+  ENDIF.
+
+*------ Belegsegment CPD-Daten nachlesen -------------------------------
+  SELECT SINGLE * FROM bsec WHERE bukrs = gs_bseg-bukrs
+                              AND belnr = gs_bseg-belnr
+                              AND gjahr = gs_bseg-gjahr
+                              AND buzei = gs_bseg-buzei.
+
+*------ Umrechnung in Ergebniswährung durchführen ----------------------
+  IF xumrechn = 'X'.
+    IF buktab-waers <> er_waers.
+      IF NOT bsega-dmshb IS INITIAL.
+        CALL FUNCTION 'CONVERT_TO_FOREIGN_CURRENCY'
+          EXPORTING
+            date             = er_datum
+            foreign_currency = er_waers
+            local_amount     = bsega-dmshb
+            local_currency   = buktab-waers
+            type_of_rate     = er_kurst
+          IMPORTING
+            foreign_amount   = bsega-dmshb
+          EXCEPTIONS
+            no_rate_found    = 1
+            overflow         = 1.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE 'A' NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+      ENDIF.
+      datn-waers = er_waers.
+    ENDIF.
+  ENDIF.
+
+*------ Satz der Satzart 2 (CPDDATEN) in Extrakt schreiben -------------
+  EXTRACT cpddaten.
+
+ENDFORM.                    "CPD_TO_EXTRACT
+
+*---------------------------------------------------------------------*
+* FORM CPDDATEN_AUSGEBEN_K                                            *
+*---------------------------------------------------------------------*
+* CPD-Daten für einen Einmaldebitor ausgeben (Konzernversion)         *
+*---------------------------------------------------------------------*
+FORM cpddaten_ausgeben_k.
+
+*------ Ausgabe nur, wenn Umsatz ungleich 0 ist ------------------------
+  CHECK cpdumsatz <> 0.
+
+*------ CPD-Information in CPDINFO füllen und Leerstellen entfernen ----
+  PERFORM cpdinfo_fuellen.
+
+*------ CPD-Informationen in ALV---------------------------------------
+  MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+  MOVE knb1-akont TO gs_output_alv_i-recon_account.
+  MOVE kna1-kunnr TO gs_output_alv_i-customer.
+  MOVE bsec-name1 TO gs_output_alv_i-name.
+  MOVE bsec-land1 TO gs_output_alv_i-country.
+  MOVE bsec-ort01 TO gs_output_alv_i-city.
+  MOVE bsec-stras TO gs_output_alv_i-street.
+  MOVE bsec-pstlz TO gs_output_alv_i-postal_code.
+  MOVE bsec-regio TO gs_output_alv_i-regio.
+  MOVE datn-waers    TO gs_output_alv_i-currency.
+  MOVE cpdumsatz     TO gs_output_alv_i-sales.
+  MOVE bsec-empfg    TO gs_output_alv_i-empfg.
+  APPEND gs_output_alv_i TO gt_output_alv_i.
+  CLEAR gs_output_alv_i.
+
+ENDFORM.                    "CPDDATEN_AUSGEBEN_K
+
+*---------------------------------------------------------------------*
+* FORM CPDDATEN_AUSGEBEN_N                                            *
+*---------------------------------------------------------------------*
+* CPD-Daten für einen Einmaldebitor ausgeben (Normalversion)          *
+*---------------------------------------------------------------------*
+FORM cpddaten_ausgeben_n.
+
+*------ Ausgabe nur, wenn Umsatz ungleich 0 ist ------------------------
+  CHECK cpdumsatz <> 0.
+
+*------ CPD-Information in CPDINFO füllen und Leerstellen entfernen ----
+  PERFORM cpdinfo_fuellen.
+
+*------ CPD-Information ausgeben ---------------------------------------
+  MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+  MOVE knb1-akont TO gs_output_alv_i-recon_account.
+  MOVE kna1-kunnr TO gs_output_alv_i-customer.
+  MOVE bsec-name1 TO gs_output_alv_i-name.
+  MOVE bsec-land1 TO gs_output_alv_i-country.
+  MOVE bsec-ort01 TO gs_output_alv_i-city.
+  MOVE bsec-stras TO gs_output_alv_i-street.
+  MOVE bsec-pstlz TO gs_output_alv_i-postal_code.
+  MOVE bsec-regio TO gs_output_alv_i-regio.
+  MOVE datn-waers    TO gs_output_alv_i-currency.
+  MOVE cpdumsatz     TO gs_output_alv_i-sales.
+  MOVE bsec-empfg    TO gs_output_alv_i-empfg.
+  APPEND gs_output_alv_i TO gt_output_alv_i.
+  CLEAR gs_output_alv_i.
+
+ENDFORM.                    "CPDDATEN_AUSGEBEN_N
+
+*---------------------------------------------------------------------*
+* FORM CPDINFO_FUELLEN                                                *
+*---------------------------------------------------------------------*
+* Feldleiste CPDINFO mit den Adressdaten füllen                       *
+*---------------------------------------------------------------------*
+FORM cpdinfo_fuellen.
+  CLEAR cpdinfo.
+  MOVE-CORRESPONDING bsec TO cpdinfo.
+  IF NOT cpdinfo-name2 IS INITIAL.
+    cpdinfo-slsh1 = ' / '.
+  ENDIF.
+  IF NOT cpdinfo-stras IS INITIAL.
+    cpdinfo-slsh2 = ' / '.
+  ENDIF.
+  IF ( NOT cpdinfo-pstlz IS INITIAL )
+  OR ( NOT cpdinfo-ort01 IS INITIAL ).
+    cpdinfo-slsh3 = ' / '.
+  ENDIF.
+  IF NOT cpdinfo-regio IS INITIAL.
+    cpdinfo-slsh4 = ' / '.
+  ENDIF.
+  CONDENSE cpdinfo.
+
+ENDFORM.                    "CPDINFO_FUELLEN
+
+*---------------------------------------------------------------------*
+* FORM CPDTOPOFPAGE                                                   *
+*---------------------------------------------------------------------*
+* Bei der Ausgabe von CPD Daten wird auf jeder neuen Seite die        *
+* CPD-Kontonummer und ggf. die Kontobezeichnung ausgegeben            *
+*---------------------------------------------------------------------*
+FORM cpdtopofpage.
+
+  CHECK vd_stufe = '0'.
+  CLEAR xcoltotal.
+  PERFORM debitor_ausgeben USING xcoltotal.
+
+ENDFORM.                    "CPDTOPOFPAGE
+
+*---------------------------------------------------------------------*
+* FORM DATEN_AUSGEBEN_K1                                              *
+*---------------------------------------------------------------------*
+* Datensatz ausgeben (Konzernversion, Sortierung 1)                    *
+*---------------------------------------------------------------------*
+FORM daten_ausgeben_k1.
+
+  DATA: ls_output_alv_h TYPE foap_s_rfduml00.
+
+  IF  xnewkto = 'X'
+  OR ( cpd_info = 'X' AND kna1-xcpdk = 'X' ).
+    CLEAR xcoltotal.
+    PERFORM debitor_ausgeben USING xcoltotal.
+*    clear xnewkto.       " Kommentar gerechtfertigt ????????????????
+  ENDIF.
+
+  IF cpd_info = 'X'.
+    READ TABLE gt_output_alv_h INTO ls_output_alv_h
+    WITH KEY company_code = knb1-bukrs
+             recon_account = knb1-akont
+             customer      = kna1-kunnr.
+    IF sy-subrc <> 0.
+      MOVE knb1-bukrs TO gs_output_alv_h-company_code.
+      MOVE knb1-akont TO gs_output_alv_h-recon_account.
+      MOVE datn-waers  TO gs_output_alv_h-currency.
+      MOVE datn-umstz  TO gs_output_alv_h-sales.
+      APPEND gs_output_alv_h TO gt_output_alv_h.
+      CLEAR gs_output_alv_h.
+
+      MOVE knb1-akont TO gs_output_alv_i-recon_account.
+      MOVE kna1-kunnr TO gs_output_alv_i-customer.
+      MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+    ENDIF.
+  ELSE.
+    MOVE:
+    knb1-akont TO gs_outtab-recon_account,
+    datn-waers  TO gs_outtab-currency,
+    knb1-bukrs TO gs_outtab-company_code,
+    datn-umstz TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "DATEN_AUSGEBEN_K1
+
+*---------------------------------------------------------------------*
+* FORM DATEN_AUSGEBEN_K23                                             *
+*---------------------------------------------------------------------*
+* Datensatz ausgeben (Konzernversion, Sortierung 2 und 3)             *
+*---------------------------------------------------------------------*
+FORM daten_ausgeben_k23.
+
+  DATA: ls_output_alv_h TYPE foap_s_rfduml00.
+
+  CHECK vd_stufe = '0'.
+  IF xnewkto = 'X'
+  OR ( cpd_info = 'X' AND kna1-xcpdk = 'X' ).
+    CLEAR xcoltotal.
+    PERFORM debitor_ausgeben USING xcoltotal.
+*    clear xnewkto.            " Kommentar gerechtfertigt ???????????
+  ENDIF.
+
+  IF cpd_info = 'X'.
+    READ TABLE gt_output_alv_h INTO ls_output_alv_h
+    WITH KEY company_code = knb1-bukrs
+             recon_account = knb1-akont
+             customer      = kna1-kunnr.
+    IF sy-subrc <> 0.
+      MOVE knb1-bukrs TO gs_output_alv_h-company_code.
+      MOVE knb1-akont TO gs_output_alv_h-recon_account.
+      MOVE datn-waers  TO gs_output_alv_h-currency.
+      MOVE datn-umstz  TO gs_output_alv_h-sales.
+      MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+      MOVE knb1-akont TO gs_output_alv_i-recon_account.
+      MOVE kna1-kunnr TO gs_output_alv_i-customer.
+      APPEND gs_output_alv_h TO gt_output_alv_h.
+      CLEAR gs_output_alv_h.
+    ENDIF.
+  ELSE.
+    MOVE:
+    datn-waers  TO gs_outtab-currency,
+    knb1-bukrs TO gs_outtab-company_code,
+    datn-umstz TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "DATEN_AUSGEBEN_K23
+
+*---------------------------------------------------------------------*
+* FORM DATEN_AUSGEBEN_N1                                              *
+*---------------------------------------------------------------------*
+* Datensatz ausgeben (Normalversion, Sortierung 1)                    *
+*---------------------------------------------------------------------*
+FORM daten_ausgeben_n1.
+
+  DATA: ls_output_alv_h TYPE foap_s_rfduml00.
+
+  CHECK vd_stufe = '0'.
+  CLEAR xcoltotal.
+  PERFORM debitor_ausgeben USING xcoltotal.
+
+  IF cpd_info = 'X'.
+    READ TABLE gt_output_alv_h INTO ls_output_alv_h
+    WITH KEY company_code = knb1-bukrs
+             recon_account = knb1-akont
+             customer      = kna1-kunnr.
+    IF sy-subrc <> 0.
+      MOVE knb1-bukrs TO gs_output_alv_h-company_code.
+      MOVE knb1-akont TO gs_output_alv_h-recon_account.
+      MOVE datn-waers  TO gs_output_alv_h-currency.
+      MOVE datn-umstz  TO gs_output_alv_h-sales.
+      MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+      MOVE knb1-akont TO gs_output_alv_i-recon_account.
+      MOVE kna1-kunnr TO gs_output_alv_i-customer.
+      APPEND gs_output_alv_h TO gt_output_alv_h.
+      CLEAR gs_output_alv_h.
+    ENDIF.
+  ELSE.
+    MOVE:
+    knb1-bukrs  TO gs_outtab-company_code,
+    kna1-kunnr  TO gs_outtab-customer,
+    knb1-akont  TO gs_outtab-recon_account,
+    datn-waers  TO gs_outtab-currency,
+    datn-umstz  TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "DATEN_AUSGEBEN_N1
+
+*---------------------------------------------------------------------*
+* FORM DATEN_AUSGEBEN_N23                                             *
+*---------------------------------------------------------------------*
+* Datensatz ausgeben (Normalversion, Sortierung 2 und 3)              *
+*---------------------------------------------------------------------*
+FORM daten_ausgeben_n23.
+
+  DATA: ls_output_alv_h TYPE foap_s_rfduml00.
+
+  CHECK vd_stufe = '0'.
+  IF xnewbuk = 'X'.
+    CLEAR xnewbuk.
+  ENDIF.
+  CLEAR xcoltotal.
+  PERFORM debitor_ausgeben USING xcoltotal.
+
+  IF cpd_info = 'X'.
+    READ TABLE gt_output_alv_h INTO ls_output_alv_h
+    WITH KEY company_code = knb1-bukrs
+             recon_account = knb1-akont
+             customer      = kna1-kunnr.
+    IF sy-subrc <> 0.
+      MOVE knb1-bukrs TO gs_output_alv_h-company_code.
+      MOVE knb1-akont TO gs_output_alv_h-recon_account.
+      MOVE datn-waers  TO gs_output_alv_h-currency.
+      MOVE datn-umstz  TO gs_output_alv_h-sales.
+      MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+      MOVE knb1-akont TO gs_output_alv_i-recon_account.
+      MOVE kna1-kunnr TO gs_output_alv_i-customer.
+      APPEND gs_output_alv_h TO gt_output_alv_h.
+      CLEAR gs_output_alv_h.
+    ENDIF.
+  ELSE.
+    MOVE:
+    datn-waers  TO gs_outtab-currency,
+    datn-umstz  TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "DATEN_AUSGEBEN_N23
+
+*---------------------------------------------------------------------*
+* FORM ENDSUTAB_AUSGEBEN                                              *
+*---------------------------------------------------------------------*
+* Absummierung über alle Buchungskreise ausgeben                      *
+*---------------------------------------------------------------------*
+FORM endsutab_ausgeben.
+
+  SORT endsutab BY waers bukrs.
+  LOOP AT endsutab.
+    MOVE:
+    endsutab-waers   TO gs_outtab-currency,
+    endsutab-bukrs   TO gs_outtab-company_code,
+     endsutab-umstz  TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab_summ.
+    CLEAR gs_outtab.
+  ENDLOOP.
+
+ENDFORM.                    "ENDSUTAB_AUSGEBEN
+
+*---------------------------------------------------------------------*
+* FORM EXTRAKT_SORTIEREN                                              *
+*---------------------------------------------------------------------*
+* Extrakt aufgrund der Angabe bei den Parametern KT_SORT und          *
+* KONZVERS sortieren                                                  *
+*---------------------------------------------------------------------*
+FORM extrakt_sortieren.
+
+*------ Sortierung nach Abstimmkonto -----------------------------------
+  CASE kt_sort.
+    WHEN '1'.
+      IF konzvers = space.
+        SORT BY knb1-bukrs knb1-akont kna1-kunnr satzart bsec-empfg.
+      ELSE.
+        SORT BY knb1-akont kna1-kunnr datn-waers knb1-bukrs satzart
+                bsec-empfg.
+      ENDIF.
+
+*------ Sortierung nach Debitornummer ----------------------------------
+    WHEN '2'.
+      IF konzvers = space.
+        SORT BY knb1-bukrs kna1-kunnr satzart bsec-empfg.
+      ELSE.
+        SORT BY kna1-kunnr datn-waers knb1-bukrs satzart bsec-empfg.
+      ENDIF.
+
+*------ Sortierung nach Umsatzhöhe -------------------------------------
+    WHEN '3'.
+      IF konzvers = space.
+        SORT BY knb1-bukrs datn-umstz DESCENDING
+                kna1-kunnr satzart bsec-empfg.
+      ELSE.
+        SORT BY umstz_kunnr DESCENDING
+                kna1-kunnr datn-waers knb1-bukrs satzart bsec-empfg.
+      ENDIF.
+
+*------ Sortierung nach Land/Postleitzahl ------------------------------
+    WHEN '4'.
+      IF konzvers = space.
+        SORT BY knb1-bukrs kna1-land1 kna1-pstlz
+                kna1-kunnr satzart bsec-empfg.
+      ELSE.
+        SORT BY kna1-land1 kna1-pstlz kna1-kunnr datn-waers
+                knb1-bukrs satzart bsec-empfg.
+      ENDIF.
+  ENDCASE.
+
+ENDFORM.                    "EXTRAKT_SORTIEREN
+
+*---------------------------------------------------------------------*
+* FORM EXTRACTTAB_FUELLEN                                             *
+*---------------------------------------------------------------------*
+* EXTRACTTAB mit den normalen Umsätzen zu einem Debitor füllen        *
+*---------------------------------------------------------------------*
+FORM extracttab_fuellen.
+
+  extracttab-bukrs   = knb1-bukrs.
+  extracttab-akont   = knb1-akont.
+  extracttab-waers   = datn-waers.
+  extracttab-umstz   = datn-umstz.
+  APPEND extracttab.
+
+ENDFORM.                    "EXTRACTTAB_FUELLEN
+
+*---------------------------------------------------------------------*
+* FORM EXTRACTTAB_IN_EXTRACT                                          *
+*---------------------------------------------------------------------*
+* Daten zu einem Debitor in den Extrakt stellen                       *
+*---------------------------------------------------------------------*
+FORM extracttab_in_extract.
+
+*------ Gesamtumsatz prüfen, ob in selektiertem Bereich ----------------
+*------ (Konzernversion in Ergebniswährung)             ----------------
+  IF  konzvers = 'X'
+  AND xumrechn = 'X'.
+    CHECK ( NOT kt_ums0 IS INITIAL OR NOT umstz_kunnr IS INITIAL )
+      AND ( umstz_kunnr IN kt_umstz ).
+  ENDIF.
+
+*------ Daten zu einem Debitor in den Extrakt schreiben ----------------
+  LOOP AT extracttab.
+    satzart = '1'.
+    knb1-bukrs = extracttab-bukrs.
+    knb1-akont = extracttab-akont.
+    datn-waers = extracttab-waers.
+    datn-umstz = extracttab-umstz.
+    EXTRACT daten.
+    xsele = 'X'.
+
+*------ CPD-Daten einlesen, falls erforderlich -------------------------
+    CHECK: cpd_info   = 'X',           "CPD-Infos gewünscht ?
+           kna1-xcpdk = 'X'.           "Ist Konto ein CPD-Konto ?
+
+    satzart = '2'.
+
+*------ BUKTAB nachlesen -----------------------------------------------
+    IF knb1-bukrs <> buktab-bukrs.
+      LOOP AT buktab WHERE bukrs = knb1-bukrs.
+        EXIT.
+      ENDLOOP.
+    ENDIF.
+    IF sy-subrc <> 0.
+      MESSAGE a080(fc) WITH '1' knb1-bukrs.
+    ENDIF.
+
+*------ BSID-Sätze in Extrakt einstellen -------------------------------
+    SELECT * FROM bsid INTO gs_bsid
+                   WHERE bukrs = knb1-bukrs
+                         AND kunnr = kna1-kunnr
+                         AND umsks = space
+                         AND umskz = space
+                         AND gjahr = gejahr
+                         AND monat IN b_period
+*                         ORDER BY PRIMARY KEY.
+                         ORDER BY  mandt
+                                   bukrs
+                                   kunnr
+                                   umsks
+                                   umskz
+                                   augdt
+                                   augbl
+                                   zuonr
+                                   gjahr
+                                   belnr
+                                   buzei.
+      PERFORM cpd_to_extract.
+    ENDSELECT.
+
+*------ BSAD-Sätze in Extrakt einstellen -------------------------------
+    SELECT * FROM bsad INTO gs_bsad
+                                 WHERE bukrs = knb1-bukrs
+                                   AND kunnr = kna1-kunnr
+                                   AND umsks = space
+                                   AND umskz = space
+                                   AND gjahr = gejahr
+                                   AND monat IN b_period
+*                         ORDER BY PRIMARY KEY.
+                          ORDER BY  mandt
+                                    bukrs
+                                    kunnr
+                                    umsks
+                                    umskz
+                                    augdt
+                                    augbl
+                                    zuonr
+                                    gjahr
+                                    belnr
+                                    buzei.
+      MOVE-CORRESPONDING gs_bsad TO gs_bsid.
+      PERFORM cpd_to_extract.
+    ENDSELECT.
+  ENDLOOP.
+
+ENDFORM.                    "EXTRACTTAB_IN_EXTRACT
+
+*---------------------------------------------------------------------*
+* FORM DEBITOR_AUSGEBEN                                               *
+*---------------------------------------------------------------------*
+* Debitornummer und Adresse ausgeben (Normal- und Konzernversion)     *
+*---------------------------------------------------------------------*
+FORM debitor_ausgeben USING xcolortotal LIKE xcoltotal.
+
+*------ Normalversion --------------------------------------------------
+*------ ... Sortierung 1 -----------------------------------------------
+  IF konzvers = space.
+    CASE kt_sort.
+      WHEN '1'.
+        IF cpd_info = 'X'.
+          MOVE kna1-kunnr TO gs_output_alv_h-customer.
+          MOVE kna1-name1 TO gs_output_alv_h-name.
+          MOVE kna1-land1 TO gs_output_alv_h-country.
+          MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+          MOVE kna1-ort01 TO gs_output_alv_h-city.
+          MOVE kna1-stras TO gs_output_alv_h-street.
+          MOVE kna1-regio TO gs_output_alv_h-regio.
+        ELSE.
+          MOVE kna1-kunnr TO gs_outtab-customer.
+          MOVE kna1-name1 TO gs_outtab-name .
+          MOVE kna1-land1 TO gs_outtab-country.
+          MOVE kna1-pstlz TO gs_outtab-postal_code.
+          MOVE kna1-ort01 TO gs_outtab-city.
+          MOVE kna1-stras TO gs_outtab-street.
+          MOVE kna1-regio TO gs_outtab-regio.
+        ENDIF.
+
+*------ ... Sortierung 2 und 3 -----------------------------------------
+      WHEN '2' OR '3'.
+        IF cpd_info = 'X'.
+          MOVE kna1-kunnr TO gs_output_alv_h-customer.
+          MOVE kna1-name1 TO gs_output_alv_h-name.
+          MOVE kna1-land1 TO gs_output_alv_h-country.
+          MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+          MOVE kna1-ort01 TO gs_output_alv_h-city.
+          MOVE kna1-stras TO gs_output_alv_h-street.
+          MOVE kna1-regio TO gs_output_alv_h-regio.
+        ELSE.
+          MOVE kna1-kunnr TO gs_outtab-customer.
+          MOVE kna1-name1 TO gs_outtab-name .
+          MOVE kna1-land1 TO gs_outtab-country.
+          MOVE kna1-pstlz TO gs_outtab-postal_code.
+          MOVE kna1-ort01 TO gs_outtab-city.
+          MOVE kna1-stras TO gs_outtab-street.
+          MOVE kna1-regio TO gs_outtab-regio.
+        ENDIF.
+
+*------ ... Sortierung 4 -----------------------------------------------
+      WHEN '4'.
+        IF cpd_info = 'X'.
+          MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+          MOVE kna1-kunnr TO gs_output_alv_h-customer.
+          MOVE kna1-name1 TO gs_output_alv_h-name.
+          MOVE kna1-land1 TO gs_output_alv_h-country.
+          MOVE kna1-ort01 TO gs_output_alv_h-city.
+          MOVE kna1-stras TO gs_output_alv_h-street.
+          MOVE kna1-regio TO gs_output_alv_h-regio.
+        ELSE.
+          MOVE kna1-pstlz TO gs_outtab-postal_code.
+          MOVE kna1-kunnr TO gs_outtab-customer.
+          MOVE kna1-name1 TO gs_outtab-name .
+          MOVE kna1-land1 TO gs_outtab-country.
+          MOVE kna1-ort01 TO gs_outtab-city.
+          MOVE kna1-stras TO gs_outtab-street.
+          MOVE kna1-regio TO gs_outtab-regio.
+        ENDIF.
+    ENDCASE.
+
+*------ Konzernversion -------------------------------------------------
+*------ ... Sortierung 1 -----------------------------------------------
+  ELSE.
+    CASE kt_sort.
+      WHEN '1'.
+        IF xcolortotal = space.
+          IF cpd_info = 'X'.
+            MOVE kna1-kunnr TO gs_output_alv_h-customer.
+            MOVE kna1-name1 TO gs_output_alv_h-name.
+            MOVE kna1-land1 TO gs_output_alv_h-country.
+            MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+            MOVE kna1-ort01 TO gs_output_alv_h-city.
+            MOVE kna1-stras TO gs_output_alv_h-street.
+            MOVE kna1-regio TO gs_output_alv_h-regio.
+          ELSE.
+            MOVE:
+             kna1-kunnr TO gs_outtab-customer,
+             kna1-name1 TO gs_outtab-name,
+             kna1-land1 TO gs_outtab-country,
+             kna1-pstlz TO gs_outtab-postal_code,
+             kna1-ort01 TO gs_outtab-city,
+             kna1-stras TO gs_outtab-street,
+             kna1-regio TO gs_outtab-regio.
+          ENDIF.
+        ELSE.
+          IF cpd_info = 'X'.
+            MOVE kna1-kunnr TO gs_output_alv_h-customer.
+            MOVE kna1-name1 TO gs_output_alv_h-name.
+            MOVE kna1-land1 TO gs_output_alv_h-country.
+            MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+            MOVE kna1-ort01 TO gs_output_alv_h-city.
+            MOVE kna1-stras TO gs_output_alv_h-street.
+            MOVE kna1-regio TO gs_output_alv_h-regio.
+          ELSE.
+            MOVE:
+             kna1-kunnr TO gs_outtab-customer,
+             kna1-name1 TO gs_outtab-name,
+             kna1-land1 TO gs_outtab-country,
+             kna1-pstlz TO gs_outtab-postal_code,
+             kna1-ort01 TO gs_outtab-city,
+             kna1-stras TO gs_outtab-street,
+             kna1-regio TO gs_outtab-regio.
+          ENDIF.
+        ENDIF.
+
+*------ ... Sortierung 2 und 3 -----------------------------------------
+      WHEN '2' OR '3'.
+        IF xcolortotal = space.
+          IF cpd_info = 'X'.
+            MOVE kna1-kunnr TO gs_output_alv_h-customer.
+            MOVE kna1-name1 TO gs_output_alv_h-name.
+            MOVE kna1-land1 TO gs_output_alv_h-country.
+            MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+            MOVE kna1-ort01 TO gs_output_alv_h-city.
+            MOVE kna1-stras TO gs_output_alv_h-street.
+            MOVE kna1-regio TO gs_output_alv_h-regio.
+          ELSE.
+            MOVE:
+             kna1-kunnr TO gs_outtab-customer,
+             kna1-name1 TO gs_outtab-name,
+             kna1-land1 TO gs_outtab-country,
+             kna1-pstlz TO gs_outtab-postal_code,
+             kna1-ort01 TO gs_outtab-city,
+             kna1-stras TO gs_outtab-street,
+             kna1-regio TO gs_outtab-regio.
+          ENDIF.
+        ELSE.
+          IF cpd_info = 'X'.
+            MOVE kna1-kunnr TO gs_output_alv_h-customer.
+            MOVE kna1-name1 TO gs_output_alv_h-name.
+            MOVE kna1-land1 TO gs_output_alv_h-country.
+            MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+            MOVE kna1-ort01 TO gs_output_alv_h-city.
+            MOVE kna1-stras TO gs_output_alv_h-street.
+            MOVE kna1-regio TO gs_output_alv_h-regio.
+          ELSE.
+            MOVE:
+             kna1-kunnr TO gs_outtab-customer,
+             kna1-name1 TO gs_outtab-name,
+             kna1-land1 TO gs_outtab-country,
+             kna1-pstlz TO gs_outtab-postal_code,
+             kna1-ort01 TO gs_outtab-city,
+             kna1-stras TO gs_outtab-street,
+             kna1-regio TO gs_outtab-regio.
+          ENDIF.
+        ENDIF.
+
+*------ ... Sortierung 4 -----------------------------------------------
+      WHEN '4'.
+        IF xcolortotal = space.
+          IF cpd_info = 'X'.
+            MOVE kna1-kunnr TO gs_output_alv_h-customer.
+            MOVE kna1-name1 TO gs_output_alv_h-name.
+            MOVE kna1-land1 TO gs_output_alv_h-country.
+            MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+            MOVE kna1-ort01 TO gs_output_alv_h-city.
+            MOVE kna1-stras TO gs_output_alv_h-street.
+            MOVE kna1-regio TO gs_output_alv_h-regio.
+          ELSE.
+            MOVE:
+             kna1-pstlz TO gs_outtab-postal_code,
+             kna1-kunnr TO gs_outtab-customer,
+             kna1-name1 TO gs_outtab-name,
+             kna1-land1 TO gs_outtab-country,
+             kna1-ort01 TO gs_outtab-city,
+             kna1-stras TO gs_outtab-street,
+             kna1-regio TO gs_outtab-regio.
+          ENDIF.
+        ELSE.
+          IF cpd_info = 'X'.
+            MOVE kna1-kunnr TO gs_output_alv_h-customer.
+            MOVE kna1-name1 TO gs_output_alv_h-name.
+            MOVE kna1-land1 TO gs_output_alv_h-country.
+            MOVE kna1-pstlz TO gs_output_alv_h-postal_code.
+            MOVE kna1-ort01 TO gs_output_alv_h-city.
+            MOVE kna1-stras TO gs_output_alv_h-street.
+            MOVE kna1-regio TO gs_output_alv_h-regio.
+          ELSE.
+            MOVE:
+             kna1-pstlz TO gs_outtab-postal_code,
+             kna1-kunnr TO gs_outtab-customer,
+             kna1-name1 TO gs_outtab-name,
+             kna1-land1 TO gs_outtab-country,
+             kna1-ort01 TO gs_outtab-city,
+             kna1-stras TO gs_outtab-street,
+             kna1-regio TO gs_outtab-regio.
+          ENDIF.
+        ENDIF.
+    ENDCASE.
+  ENDIF.
+
+ENDFORM.                    "DEBITOR_AUSGEBEN
+
+*---------------------------------------------------------------------*
+* FORM MIKROFICHE                                                     *
+*---------------------------------------------------------------------*
+* Variablen Teil der Mikrofiche-Zeile bestimmen                       *
+*---------------------------------------------------------------------*
+FORM mikrofiche USING zeitpunkt TYPE c.
+
+*------ Nur durchführen, wenn Mikrofiche gewünscht ---------------------
+  CHECK mikfiche = 'X'.
+
+*------ Normalversion --------------------------------------------------
+*------ ... Sortierung 1 -----------------------------------------------
+  CASE konzvers.
+    WHEN space.
+      CASE kt_sort.
+        WHEN '1'.
+          CASE zeitpunkt.
+            WHEN 'AT_DATEN'.
+              mifn1-bukrs = knb1-bukrs.
+              mifn1-akont = knb1-akont.
+              mifn1-kunnr = kna1-kunnr.
+              bhdgd-grpin = mifn1.
+            WHEN 'AT_END_OF_KNB1-AKONT'.
+              CLEAR mifn1-kunnr.
+            WHEN 'AT_END_OF_KNB1-BUKRS'.
+              CLEAR mifn1-akont.
+            WHEN 'AT_LAST'.
+              CLEAR mifn1.
+          ENDCASE.
+          bhdgd-grpin = mifn1.
+
+*------ ... Sortierung 2 -----------------------------------------------
+        WHEN '2'.
+          CASE zeitpunkt.
+            WHEN 'AT_DATEN'.
+              mifn2-bukrs = knb1-bukrs.
+              mifn2-kunnr = kna1-kunnr.
+            WHEN 'AT_END_OF_KNB1-BUKRS'.
+              CLEAR mifn2-kunnr.
+            WHEN 'AT_LAST'.
+              CLEAR mifn2.
+          ENDCASE.
+          bhdgd-grpin = mifn2.
+
+*------ ... Sortierung 3 -----------------------------------------------
+        WHEN '3'.
+          CASE zeitpunkt.
+            WHEN 'AT_DATEN'.
+              mifn3-bukrs = knb1-bukrs.
+              WRITE datn-umstz CURRENCY datn-waers TO mifn3-umstz.
+            WHEN 'AT_END_OF_KNB1-BUKRS'.
+              CLEAR mifn3-umstz.
+            WHEN 'AT_LAST'.
+              CLEAR mifn3.
+          ENDCASE.
+          bhdgd-grpin = mifn3.
+
+*------ ... Sortierung 4 -----------------------------------------------
+        WHEN '4'.
+          CASE zeitpunkt.
+            WHEN 'AT_DATEN'.
+              mifn4-bukrs = knb1-bukrs.
+              mifn4-land1 = kna1-land1.
+              mifn4-pstlz = kna1-pstlz.
+              mifn4-kunnr = kna1-kunnr.
+            WHEN 'AT_END_OF_KNA1-LAND1'.
+              CLEAR mifn4-kunnr.
+              CLEAR mifn4-pstlz.
+            WHEN 'AT_END_OF_KNB1-BUKRS'.
+              CLEAR mifn4-land1.
+            WHEN 'AT_LAST'.
+              CLEAR mifn4.
+          ENDCASE.
+          bhdgd-grpin = mifn4.
+      ENDCASE.
+
+*------ Konzernversion -------------------------------------------------
+*------ ... Sortierung 1 -----------------------------------------------
+    WHEN OTHERS.
+      CASE kt_sort.
+        WHEN '1'.
+          CASE zeitpunkt.
+            WHEN 'AT_DATEN'.
+              mifk1-akont = knb1-akont.
+              mifk1-kunnr = kna1-kunnr.
+              mifk1-bukrs = knb1-bukrs.
+            WHEN 'AT_END_OF_KNA1-KUNNR'.
+              CLEAR mifk1-bukrs.
+            WHEN 'AT_END_OF_KNB1-AKONT'.
+              CLEAR mifk1-kunnr.
+            WHEN 'AT_LAST'.
+              CLEAR mifk1.
+          ENDCASE.
+          bhdgd-grpin = mifk1.
+
+*------ ... Sortierung 2 -----------------------------------------------
+        WHEN '2'.
+          CASE zeitpunkt.
+            WHEN 'AT_DATEN'.
+              mifk2-kunnr = kna1-kunnr.
+              mifk2-bukrs = knb1-bukrs.
+            WHEN 'AT_END_OF_KNA1-KUNNR'.
+              CLEAR mifk2-bukrs.
+            WHEN 'AT_LAST'.
+              CLEAR mifk2.
+          ENDCASE.
+          bhdgd-grpin = mifk2.
+
+*------ ... Sortierung 3 -----------------------------------------------
+        WHEN '3'.
+          CASE zeitpunkt.
+            WHEN 'AT_END_OF_DATN-WAERS'.
+              WRITE umstz_waers CURRENCY er_waers TO mifk3-umstz.
+            WHEN 'AT_LAST'.
+              CLEAR mifk3.
+          ENDCASE.
+          bhdgd-grpin = mifk3.
+
+*------ ... Sortierung 4 -----------------------------------------------
+        WHEN '4'.
+          CASE zeitpunkt.
+            WHEN 'AT_DATEN'.
+              mifk4-land1 = kna1-land1.
+              mifk4-pstlz = kna1-pstlz.
+              mifk4-kunnr = kna1-kunnr.
+              mifk4-bukrs = knb1-bukrs.
+            WHEN 'AT_END_OF_KNA1-KUNNR'.
+              CLEAR mifk4-bukrs.
+            WHEN 'AT_END_OF_KNA1-LAND1'.
+              CLEAR mifk4-kunnr.
+              CLEAR mifk4-pstlz.
+            WHEN 'AT_LAST'.
+              CLEAR mifk4.
+          ENDCASE.
+          bhdgd-grpin = mifk4.
+      ENDCASE.
+  ENDCASE.
+
+ENDFORM.                    "MIKROFICHE
+
+*---------------------------------------------------------------------*
+* FORM WAERS_SUMME_K1                                                 *
+*---------------------------------------------------------------------*
+* Währungssumme ausgeben (Konzernversion, Sortierung 1)               *
+*---------------------------------------------------------------------*
+FORM waers_summe_k1.
+
+*------ Währungssumme ausgeben (VD_STUFE '1') --------------------------
+  IF vd_stufe = '1'.
+    IF xnewkto = 'X'.
+      CLEAR xcoltotal.
+      PERFORM debitor_ausgeben USING xcoltotal.
+*      CLEAR XNEWKTO.   " <--------------????????????????????
+    ENDIF.
+    MOVE:
+      knb1-akont  TO gs_outtab-recon_account,
+      datn-waers  TO gs_outtab-currency,
+      umstz_waers TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "WAERS_SUMME_K1
+
+*---------------------------------------------------------------------*
+* FORM WAERS_SUMME_K23                                                *
+*---------------------------------------------------------------------*
+* Währungssumme ausgeben (Konzernversion, Sortierung 2 und 3)         *
+*---------------------------------------------------------------------*
+FORM waers_summe_k23.
+
+*------ Währungssumme ausgeben (VD_STUFE '1') --------------------------
+  IF vd_stufe = '1'.
+    IF xnewkto = 'X'.
+      CLEAR xcoltotal.
+      PERFORM debitor_ausgeben USING xcoltotal.
+*      CLEAR XNEWKTO.   "<-------------------????????????????????????
+    ENDIF.
+    MOVE:
+    datn-waers  TO gs_outtab-currency,
+    umstz_waers TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "WAERS_SUMME_K23
+
+*---------------------------------------------------------------------*
+*      Form  LAND_AUSGEBEN                                            *
+*---------------------------------------------------------------------*
+*      Land mit Bezeichnung ausgeben                                  *
+*---------------------------------------------------------------------*
+FORM land_ausgeben.
+
+*------ Lokale Datendeklarationen --------------------------------------
+  DATA: lv_text(40) TYPE c.
+
+*------ Ausgabe nur bei Sortierung 4 (nach Land/Postleitzahl) ----------
+  CHECK kt_sort = '4'.
+
+*------ Ausgabe nur bei bestimmten Verdichtungsstufen ------------------
+  CHECK ( konzvers = ' ' AND vd_stufe =  '0' )
+     OR ( konzvers = 'X' AND vd_stufe <= '2' ).           "#EC PORTABLE
+
+*------ Ausgabe nicht bei Endsummierungsblatt --------------------------
+  CHECK xtopzeile = 'X'.
+
+*------ T005T (Texttabelle zum Land) selektieren -----------------------
+  IF kna1-land1 IS INITIAL.
+    lv_text = TEXT-ln1.
+  ELSE.
+    IF sy-langu   <> t005t-spras
+    OR kna1-land1 <> t005t-land1.
+      SELECT SINGLE * FROM t005t WHERE spras = sy-langu
+                                   AND land1 = kna1-land1.
+      IF sy-subrc = 0.
+        lv_text = t005t-landx.
+      ELSE.
+        lv_text = TEXT-ln2.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    "LAND_AUSGEBEN
+
+*---------------------------------------------------------------------*
+* FORM DATEN_AUSGEBEN_N4                                              *
+*---------------------------------------------------------------------*
+* Datensatz ausgeben (Normalversion, Sortierung 4)                    *
+*---------------------------------------------------------------------*
+FORM daten_ausgeben_n4.
+
+  DATA: ls_output_alv_h TYPE foap_s_rfduml00.
+
+  CHECK vd_stufe = '0'.
+  CLEAR xcoltotal.
+  PERFORM debitor_ausgeben USING xcoltotal.
+
+  IF cpd_info = 'X'.
+    READ TABLE gt_output_alv_h INTO ls_output_alv_h
+    WITH KEY company_code = knb1-bukrs
+             recon_account = knb1-akont
+             customer      = kna1-kunnr.
+    IF sy-subrc <> 0.
+      MOVE knb1-bukrs TO gs_output_alv_h-company_code.
+      MOVE knb1-akont TO gs_output_alv_h-recon_account.
+      MOVE datn-waers  TO gs_output_alv_h-currency.
+      MOVE datn-umstz  TO gs_output_alv_h-sales.
+      MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+      MOVE knb1-akont TO gs_output_alv_i-recon_account.
+      MOVE kna1-kunnr TO gs_output_alv_i-customer.
+      APPEND gs_output_alv_h TO gt_output_alv_h.
+      CLEAR gs_output_alv_h.
+    ENDIF.
+  ELSE.
+    MOVE:
+     knb1-bukrs TO gs_outtab-company_code,
+     datn-waers TO gs_outtab-currency,
+     datn-umstz TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "DATEN_AUSGEBEN_N4
+
+*---------------------------------------------------------------------*
+*      Form  LAND_SUMME_N4                                            *
+*---------------------------------------------------------------------*
+*      Summe pro Land ausgeben (Normalversion, Sortierung 4)          *
+*---------------------------------------------------------------------*
+FORM land_summe_n4.
+
+  CHECK vd_stufe = '1'.                                   "#EC PORTABLE
+
+  MOVE knb1-bukrs TO gs_outtab-company_code.
+  MOVE kna1-land1 TO gs_outtab-country.
+  MOVE:
+  datn-waers  TO gs_outtab-currency,
+  umstz_land1 TO gs_outtab-sales.
+  APPEND gs_outtab TO gt_outtab.
+  CLEAR gs_outtab.
+
+ENDFORM.                    "LAND_SUMME_N4
+
+*---------------------------------------------------------------------*
+*      Form  BUKRS_SUMME_N4                                           *
+*---------------------------------------------------------------------*
+*      Buchungskreissumme ausgeben (Normalversion, Sortierung 4)      *
+*---------------------------------------------------------------------*
+FORM bukrs_summe_n4.
+
+  CHECK vd_stufe = '2'.                                   "#EC PORTABLE
+  MOVE :
+   knb1-bukrs  TO gs_outtab-company_code,
+   datn-waers  TO gs_outtab-currency,
+   umstz_bukrs TO gs_outtab-sales.
+  APPEND gs_outtab TO gt_outtab.
+  CLEAR gs_outtab.
+
+ENDFORM.                    "BUKRS_SUMME_N4
+
+*eject
+*---------------------------------------------------------------------*
+*      Form  DATEN_AUSGEBEN_K4                                        *
+*---------------------------------------------------------------------*
+*      Datensatz ausgeben (Konzernversion, Sortierung 4)              *
+*---------------------------------------------------------------------*
+FORM daten_ausgeben_k4.
+
+  DATA: ls_output_alv_h TYPE foap_s_rfduml00.
+
+*------ Nur bei Verdichtungsstufe 0 durchführen ------------------------
+  CHECK vd_stufe = '0'.
+
+  IF  xnewkto = 'X'
+  OR ( cpd_info = 'X' AND kna1-xcpdk = 'X' ).
+    CLEAR xcoltotal.
+    PERFORM debitor_ausgeben USING xcoltotal.
+*    clear xnewkto.    "<-----------------------------?????????????
+  ENDIF.
+
+*------ Umsatzzahl zum Debitor ausgeben --------------------------------
+  IF cpd_info = 'X'.
+    READ TABLE gt_output_alv_h INTO ls_output_alv_h
+    WITH KEY company_code = knb1-bukrs
+             recon_account = knb1-akont
+             customer      = kna1-kunnr.
+    IF sy-subrc <> 0.
+      MOVE knb1-bukrs TO gs_output_alv_h-company_code.
+      MOVE knb1-akont TO gs_output_alv_h-recon_account.
+      MOVE datn-waers  TO gs_output_alv_h-currency.
+      MOVE datn-umstz  TO gs_output_alv_h-sales.
+      MOVE knb1-bukrs TO gs_output_alv_i-company_code.
+      MOVE knb1-akont TO gs_output_alv_i-recon_account.
+      MOVE kna1-kunnr TO gs_output_alv_i-customer.
+      APPEND gs_output_alv_h TO gt_output_alv_h.
+      CLEAR gs_output_alv_h.
+    ENDIF.
+  ELSE.
+    MOVE:
+    kna1-land1 TO gs_outtab-country,
+    datn-waers TO gs_outtab-currency,
+    knb1-bukrs TO gs_outtab-company_code,
+    datn-umstz TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "DATEN_AUSGEBEN_K4
+
+*---------------------------------------------------------------------*
+*      Form  WAERS_SUMME_K4                                           *
+*---------------------------------------------------------------------*
+*      Währungssumme ausgeben (Konzernversion, Sortierung 4)          *
+*---------------------------------------------------------------------*
+FORM waers_summe_k4.
+
+*------ Währungssumme ausgeben (VD_STUFE '1') --------------------------
+  IF vd_stufe = '1'.
+    IF xnewkto = 'X'.
+      CLEAR xcoltotal.
+      PERFORM debitor_ausgeben USING xcoltotal.
+*      CLEAR XNEWKTO.   "<-----------------------------????????
+    ENDIF.
+    MOVE:
+    kna1-land1  TO gs_outtab-country,
+    datn-waers  TO gs_outtab-currency,
+    umstz_waers TO gs_outtab-sales.
+    APPEND gs_outtab TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDIF.
+
+ENDFORM.                    "WAERS_SUMME_K4
+
+*---------------------------------------------------------------------*
+*      Form  LAND_SUMME_K4                                            *
+*---------------------------------------------------------------------*
+*      Summe pro Land ausgeben (Konzernversion, Sortierung 4)         *
+*---------------------------------------------------------------------*
+FORM land_summe_k4.
+
+  CHECK vd_stufe = '2'.                                   "#EC PORTABLE
+  SORT waerstab BY waers.
+  LOOP AT waerstab.
+    MOVE kna1-land1     TO gs_outtab-country.
+    MOVE waerstab-waers TO gs_outtab-currency.
+    MOVE waerstab-umstz TO gs_outtab-sales.
+    APPEND gs_outtab    TO gt_outtab.
+    CLEAR gs_outtab.
+  ENDLOOP.
+
+ENDFORM.                    "LAND_SUMME_K4
+
+
+*&--------------------------------------------------------------------*
+*&      Form  default_variant_get_alv
+*&--------------------------------------------------------------------*
+*       text
+*---------------------------------------------------------------------*
+*      -->VALUE(IV_SAtext
+*      -->XS_VARIANT text
+*      -->XV_VARI    text
+*---------------------------------------------------------------------*
+FORM default_variant_get_alv USING    VALUE(iv_save) TYPE any
+                             CHANGING xs_variant TYPE disvariant
+                                  xv_vari TYPE slis_vari.   "#EC CALLED
+
+  CALL FUNCTION 'REUSE_ALV_VARIANT_DEFAULT_GET'
+    EXPORTING
+      i_save     = iv_save
+    CHANGING
+      cs_variant = xs_variant
+    EXCEPTIONS
+      not_found  = 2.
+  IF sy-subrc = 0.
+    xv_vari = xs_variant-variant.
+  ENDIF.
+
+ENDFORM.                    " DEFAULT_VARIANT_GET_ALV
+*&---------------------------------------------------------------------*
+*&      Form  VARIANT_GET_ALV
+*&---------------------------------------------------------------------*
+*       Get the F4 help for the varinant parameter
+*----------------------------------------------------------------------
+*      <->XS_VARIANT  Variant Structure
+*      <->XV_VARI     Variant Name
+*----------------------------------------------------------------------
+FORM variant_get_alv CHANGING xs_variant TYPE disvariant
+                          xv_vari TYPE disvariant-variant.  "#EC CALLED
+
+  CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+    EXPORTING
+      is_variant = xs_variant
+      i_save     = gv_save
+    IMPORTING
+      e_exit     = gv_exit
+      es_variant = xs_variant
+    EXCEPTIONS
+      not_found  = 2.
+  IF sy-subrc = 2.
+    MESSAGE ID sy-msgid TYPE 'S'      NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ELSE.
+    IF gv_exit = space.
+      xv_vari = xs_variant-variant.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " VARIANT_GET_ALV
+*&---------------------------------------------------------------------*
+*&      Form  VARIANT_EXIST_CHECK_ALV
+*&---------------------------------------------------------------------*
+*       Check for the existance of the used ALV display variant .
+*----------------------------------------------------------------------*
+*      -->IV_SAVE     Save Option
+*      <->XS_VARIANT  Variant table
+*----------------------------------------------------------------------*
+FORM variant_exist_check_alv USING iv_save TYPE c
+                      CHANGING xs_variant TYPE disvariant.  "#EC CALLED
+
+  CALL FUNCTION 'REUSE_ALV_VARIANT_EXISTENCE'
+    EXPORTING
+      i_save        = iv_save
+    CHANGING
+      cs_variant    = xs_variant
+    EXCEPTIONS
+      wrong_input   = 1
+      not_found     = 2
+      program_error = 3
+      OTHERS        = 4.
+  IF sy-subrc <> 0.
+    MESSAGE e350(bp).
+  ENDIF.
+
+ENDFORM.                    " VARIANT_EXIST_CHECK_ALV
+*&---------------------------------------------------------------------*
+*&      Form  display_alv_list
+*&---------------------------------------------------------------------*
+*       Display the ALV List output.
+*----------------------------------------------------------------------*
+FORM display_alv_list .
+
+*    The inputs that need to be passed to the REUSE_ALV function module
+  DATA: lt_fieldcat TYPE slis_t_fieldcat_alv,     "Field Catalog Table
+        lt_sort     TYPE slis_t_sortinfo_alv,     "Sort Information
+        lt_events   TYPE slis_t_event,            "Events to be handled
+        ls_layout   TYPE slis_layout_alv,         "Layout Structure
+        ls_print    TYPE slis_print_alv.          "Print parameters
+
+
+*   Build the fieldcatalog based on the Output and Sort Sequence.
+  PERFORM fieldcatalog_build_alv CHANGING lt_fieldcat.
+
+*    The Sort Information ( Fields sequence for Sorting ,
+*    Subtotaling ) is prepared
+  PERFORM sort_info_build_alv CHANGING lt_sort.
+
+*    Set The Events of the Grid that we wish to handle.
+  PERFORM eventtab_build_alv CHANGING lt_events.
+
+*    Build the Layout of the ALV grid
+  PERFORM layout_build_alv CHANGING ls_layout.
+
+*    Set the print parameters so that record/list info in spool req.
+*    does not appear  when report processed in background.
+  PERFORM print_parameters_set CHANGING ls_print.
+
+* Call REUSE_ALV function to display the output in simple ALV list form
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program       = gv_repid
+      is_layout                = ls_layout
+      it_fieldcat              = lt_fieldcat
+      it_sort                  = lt_sort
+      i_save                   = gv_save
+      is_variant               = gs_variant
+      it_events                = lt_events
+      is_print                 = ls_print
+      i_callback_pf_status_set = gc_handle_pf_status
+    TABLES
+      t_outtab                 = gt_outtab
+    EXCEPTIONS
+      program_error            = 1
+      OTHERS                   = 2.
+  IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+  ENDIF.
+
+ENDFORM.                    " display_alv_list
+*&---------------------------------------------------------------------*
+*&      Form  FIELDCATALOG_BUILD_ALV
+*&---------------------------------------------------------------------*
+*       Build the Field Catalog using DDIC Strcture FOAP_S_RFDUML00
+*----------------------------------------------------------------------*
+*      <->XT_FIELDCAT  Table for Field Catalog
+*----------------------------------------------------------------------*
+FORM fieldcatalog_build_alv CHANGING xt_fieldcat TYPE
+                                      slis_t_fieldcat_alv.
+
+  DATA: ls_fieldcat TYPE slis_fieldcat_alv.  "Work area for xt_fieldcat
+
+*    First build the default field catalog  from DDIC structure
+*    This will be used for header table
+  CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+    EXPORTING
+      i_structure_name       = gc_structname
+    CHANGING
+      ct_fieldcat            = xt_fieldcat
+    EXCEPTIONS
+      inconsistent_interface = 1
+      program_error          = 2
+      OTHERS                 = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+  LOOP AT xt_fieldcat INTO ls_fieldcat.
+    IF xendsu = space.
+*------ ...... Normalversion -------------------------------------------
+      IF konzvers = space.
+        CASE kt_sort.
+          WHEN '1'.
+            CASE ls_fieldcat-fieldname.
+              WHEN 'SALES'.
+                MOVE gc_x TO ls_fieldcat-do_sum.
+              WHEN 'POSTAL_CODE'.
+            ENDCASE.
+
+          WHEN '2' OR '3'.
+            CASE ls_fieldcat-fieldname.
+              WHEN 'COMPANY_CODE'.
+                MOVE 1 TO ls_fieldcat-col_pos.
+              WHEN 'CUSTOMER'.
+                MOVE 2 TO ls_fieldcat-col_pos.
+              WHEN 'NAME'.
+                MOVE 3 TO ls_fieldcat-col_pos.
+              WHEN 'COUNTRY'.
+                MOVE 4 TO ls_fieldcat-col_pos.
+              WHEN 'CITY'.
+                MOVE 5 TO ls_fieldcat-col_pos.
+              WHEN 'STREET'.
+                MOVE 6 TO ls_fieldcat-col_pos.
+              WHEN 'CURRENCY'.
+                MOVE 7 TO ls_fieldcat-col_pos.
+              WHEN 'SALES'.
+                MOVE 8 TO ls_fieldcat-col_pos.
+                MOVE gc_x TO ls_fieldcat-do_sum.
+              WHEN 'POSTAL_CODE'.
+                MOVE gc_x TO ls_fieldcat-tech .
+              WHEN 'RECON_ACCOUNT'.
+                MOVE gc_x TO ls_fieldcat-tech .
+            ENDCASE.
+
+          WHEN '4'.
+            CASE ls_fieldcat-fieldname.
+              WHEN 'COMPANY_CODE'.
+                MOVE 1 TO ls_fieldcat-col_pos.
+              WHEN 'CUSTOMER'.
+                MOVE 4 TO ls_fieldcat-col_pos.
+              WHEN 'NAME'.
+                MOVE 5 TO ls_fieldcat-col_pos.
+              WHEN 'COUNTRY'.
+                MOVE 2 TO ls_fieldcat-col_pos.
+              WHEN 'CITY'.
+                MOVE 6 TO ls_fieldcat-col_pos.
+              WHEN 'STREET'.
+                MOVE 7 TO ls_fieldcat-col_pos.
+              WHEN 'CURRENCY'.
+                MOVE 8 TO ls_fieldcat-col_pos.
+              WHEN 'SALES'.
+                MOVE 9 TO ls_fieldcat-col_pos.
+                MOVE gc_x TO ls_fieldcat-do_sum.
+              WHEN 'POSTAL_CODE'.
+                MOVE 3 TO ls_fieldcat-col_pos.
+              WHEN 'RECON_ACCOUNT'.
+                MOVE gc_x TO ls_fieldcat-tech .
+            ENDCASE.
+        ENDCASE.
+
+*------ ...... Konzernversion ------------------------------------------
+      ELSE.
+        CASE kt_sort.
+          WHEN '1'.
+            CASE ls_fieldcat-fieldname.
+              WHEN 'COMPANY_CODE'.
+                MOVE 8 TO ls_fieldcat-col_pos.
+              WHEN 'CUSTOMER'.
+                MOVE 2 TO ls_fieldcat-col_pos.
+              WHEN 'NAME'.
+                MOVE 3 TO ls_fieldcat-col_pos.
+              WHEN 'COUNTRY'.
+                MOVE 4 TO ls_fieldcat-col_pos.
+              WHEN 'CITY'.
+                MOVE 5 TO ls_fieldcat-col_pos.
+              WHEN 'STREET'.
+                MOVE 6 TO ls_fieldcat-col_pos.
+              WHEN 'CURRENCY'.
+                MOVE 7 TO ls_fieldcat-col_pos.
+              WHEN 'SALES'.
+                MOVE 9 TO ls_fieldcat-col_pos.
+                MOVE gc_x TO ls_fieldcat-do_sum.
+              WHEN 'POSTAL_CODE'.
+                MOVE gc_x TO ls_fieldcat-tech .
+              WHEN 'RECON_ACCOUNT'.
+                MOVE 1 TO ls_fieldcat-col_pos.
+            ENDCASE.
+
+          WHEN '2' OR '3'.
+            CASE ls_fieldcat-fieldname.
+              WHEN 'COMPANY_CODE'.
+                MOVE 7 TO ls_fieldcat-col_pos.
+              WHEN 'CUSTOMER'.
+                MOVE 1 TO ls_fieldcat-col_pos.
+              WHEN 'NAME'.
+                MOVE 2 TO ls_fieldcat-col_pos.
+              WHEN 'COUNTRY'.
+                MOVE 3 TO ls_fieldcat-col_pos.
+              WHEN 'CITY'.
+                MOVE 4 TO ls_fieldcat-col_pos.
+              WHEN 'STREET'.
+                MOVE 5 TO ls_fieldcat-col_pos.
+              WHEN 'CURRENCY'.
+                MOVE 6 TO ls_fieldcat-col_pos.
+              WHEN 'SALES'.
+                MOVE 8 TO ls_fieldcat-col_pos.
+                MOVE gc_x TO ls_fieldcat-do_sum.
+              WHEN 'POSTAL_CODE'.
+                MOVE gc_x TO ls_fieldcat-tech .
+              WHEN 'RECON_ACCOUNT'.
+                MOVE gc_x TO ls_fieldcat-tech .
+            ENDCASE.
+
+          WHEN '4'.
+            CASE ls_fieldcat-fieldname.
+              WHEN 'COMPANY_CODE'.
+                MOVE 8 TO ls_fieldcat-col_pos.
+              WHEN 'CUSTOMER'.
+                MOVE 3 TO ls_fieldcat-col_pos.
+              WHEN 'NAME'.
+                MOVE 4 TO ls_fieldcat-col_pos.
+              WHEN 'COUNTRY'.
+                MOVE 1 TO ls_fieldcat-col_pos.
+              WHEN 'CITY'.
+                MOVE 5 TO ls_fieldcat-col_pos.
+              WHEN 'STREET'.
+                MOVE 6 TO ls_fieldcat-col_pos.
+              WHEN 'CURRENCY'.
+                MOVE 7 TO ls_fieldcat-col_pos.
+              WHEN 'SALES'.
+                MOVE 9 TO ls_fieldcat-col_pos.
+                MOVE gc_x TO ls_fieldcat-do_sum.
+              WHEN 'POSTAL_CODE'.
+                MOVE 2 TO ls_fieldcat-col_pos .
+              WHEN 'RECON_ACCOUNT'.
+                MOVE gc_x TO ls_fieldcat-tech .
+            ENDCASE.
+        ENDCASE.
+      ENDIF.
+    ENDIF.
+*    Append the data for each field to the Field Catalog table
+    MODIFY xt_fieldcat FROM ls_fieldcat
+                       TRANSPORTING col_pos tech do_sum.
+    CLEAR  ls_fieldcat.
+
+  ENDLOOP.
+ENDFORM.                    " FIELDCATALOG_BUILD_ALV
+*&---------------------------------------------------------------------*
+*&      Form  SORT_INFO_BUILD_ALV
+*&---------------------------------------------------------------------*
+*    Sort the field on the basis Sort Sequence eneterd by user
+*----------------------------------------------------------------------*
+*      <->XT_SORT  Table that will contain the sort information
+*----------------------------------------------------------------------*
+FORM sort_info_build_alv  CHANGING xt_sort TYPE slis_t_sortinfo_alv.
+
+  DATA ls_sort TYPE slis_sortinfo_alv.    "Work area for sort-info table
+
+* For each of these sort sequences you can choose between a standard
+* version and a corporate group version. In the standard version, the
+* accounts are listed per company code. In the corporate group version
+* the company codes are listed per account.
+*------ Sortierung nach Abstimmkonto -----------------------------------
+  CASE kt_sort.
+    WHEN '1'.
+      IF konzvers = space.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-up = gc_x.
+        ls_sort-group     = '*'.
+        ls_sort-subtot = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CLEAR ls_sort.
+        ls_sort-spos = '2'.
+        ls_sort-fieldname = 'RECON_ACCOUNT'.
+        ls_sort-group     = '*'.
+        ls_sort-subtot = gc_x.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CLEAR ls_sort.
+        ls_sort-spos = '3'.
+        ls_sort-fieldname = 'CUSTOMER'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+        CLEAR ls_sort.
+
+* The entry you make in the "Summarization level" field determines
+* whether the data is displayed in detailed or summarized form.
+* Summarization levels:
+
+* 0 = No summarization (total per customer/vendor account)
+* 1 = Summarization of the customer/vendor accounts (total per
+*   reconciliation account)
+* 2 = Summarization per reconciliation account (total per company code)
+
+        CASE vd_stufe.
+          WHEN '1'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'RECON_ACCOUNT'.
+            IF sy-subrc = 0.
+              ls_sort-subtot = space.
+              ls_sort-group = space.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING group subtot
+              WHERE fieldname = 'RECON_ACCOUNT'.
+            ENDIF.
+            CLEAR ls_sort.
+
+          WHEN'2'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'COMPANY_CODE'.
+            IF sy-subrc = 0.
+              ls_sort-subtot = space.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING subtot
+              WHERE fieldname = 'COMPANY_CODE'.
+            ENDIF.
+            CLEAR ls_sort.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'RECON_ACCOUNT'.
+            IF sy-subrc = 0.
+              ls_sort-subtot = space.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING  subtot
+              WHERE fieldname = 'RECON_ACCOUNT'.
+            ENDIF.
+            CLEAR ls_sort.
+        ENDCASE.
+
+      ELSE.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'RECON_ACCOUNT'.
+        ls_sort-up = gc_x.
+        ls_sort-group     = '*'.
+        ls_sort-subtot = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CLEAR ls_sort.
+        ls_sort-spos = '2'.
+        ls_sort-fieldname = 'CUSTOMER'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CLEAR ls_sort.
+        ls_sort-spos = '3'.
+        ls_sort-fieldname = 'CURRENCY'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        ls_sort-spos = '4'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+      ENDIF.
+
+*------ Sortierung nach Debitornummer ----------------------------------
+    WHEN '2'.
+      IF konzvers = space.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-up = gc_x.
+        ls_sort-group     = '*'.
+        ls_sort-subtot = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CASE vd_stufe.
+          WHEN '1'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'COMPANY_CODE'.
+            IF sy-subrc = 0.
+              ls_sort-subtot = space.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING subtot
+              WHERE fieldname = 'COMPANY_CODE'.
+            ENDIF.
+            CLEAR ls_sort.
+          WHEN OTHERS.
+        ENDCASE.
+
+      ELSE.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'CUSTOMER'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        ls_sort-spos = '2'.
+        ls_sort-fieldname = 'CURRENCY'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        ls_sort-spos = '3'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+      ENDIF.
+
+*------ Sortierung nach Umsatzhöhe -------------------------------------
+    WHEN '3'.
+      IF konzvers = space.
+
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-up = gc_x.
+        ls_sort-subtot = gc_x.
+        ls_sort-group     = '*'.
+
+        APPEND ls_sort TO xt_sort.
+
+        CASE vd_stufe.
+          WHEN '1'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'COMPANY_CODE'.
+            IF sy-subrc = 0.
+              ls_sort-subtot = space.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING subtot
+              WHERE fieldname = 'COMPANY_CODE'.
+            ENDIF.
+            CLEAR ls_sort.
+          WHEN OTHERS.
+        ENDCASE.
+      ELSE.
+
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'CUSTOMER'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        ls_sort-spos = '2'.
+        ls_sort-fieldname = 'SALES'.
+        ls_sort-down = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        ls_sort-spos = '3'.
+        ls_sort-fieldname = 'CURRENCY'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        ls_sort-spos = '4'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CASE vd_stufe.
+          WHEN '1'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'SALES'.
+            IF sy-subrc = 0.
+              ls_sort-spos = '1'.
+              ls_sort-down = gc_x.
+              ls_sort-up = space.
+
+              MODIFY xt_sort FROM ls_sort TRANSPORTING spos down up
+              WHERE fieldname = 'SALES'.
+            ENDIF.
+            CLEAR ls_sort.
+
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'CUSTOMER'.
+            IF sy-subrc = 0.
+              ls_sort-spos = '2'.
+              ls_sort-up = gc_x.
+
+              MODIFY xt_sort FROM ls_sort TRANSPORTING spos up
+              WHERE fieldname = 'CUSTOMER'.
+            ENDIF.
+            CLEAR ls_sort.
+
+          WHEN'2'.
+
+          WHEN '3'.
+
+          WHEN OTHERS.
+        ENDCASE.
+      ENDIF.
+
+*------ Sortierung nach Land/Postleitzahl ------------------------------
+    WHEN '4'.
+      IF konzvers = space.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        ls_sort-spos = '2'.
+        ls_sort-fieldname = 'COUNTRY'.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CASE vd_stufe.
+          WHEN '0'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'COMPANY_CODE'.
+            IF sy-subrc = 0.
+              ls_sort-subtot = gc_x.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING subtot
+                      WHERE fieldname = 'COMPANY_CODE'.
+            ENDIF.
+            READ TABLE xt_sort INTO ls_sort
+           WITH KEY fieldname = 'COUNTRY'.
+            IF sy-subrc = 0.
+              ls_sort-group     = '*'.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING group
+                      WHERE fieldname = 'COUNTRY'.
+            ENDIF.
+            CLEAR ls_sort.
+          WHEN '1'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'COMPANY_CODE'.
+            IF sy-subrc = 0.
+              ls_sort-subtot = gc_x.
+              ls_sort-group     = '*'.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING subtot group
+              WHERE fieldname = 'COMPANY_CODE'.
+            ENDIF.
+            CLEAR ls_sort.
+          WHEN'2'.
+            READ TABLE xt_sort INTO ls_sort
+            WITH KEY fieldname = 'COMPANY_CODE'.
+            IF sy-subrc = 0.
+              ls_sort-group     = '*'.
+              MODIFY xt_sort FROM ls_sort TRANSPORTING group
+              WHERE fieldname = 'COMPANY_CODE'.
+            ENDIF.
+            CLEAR ls_sort.
+          WHEN '3'.
+          WHEN OTHERS.
+        ENDCASE.
+      ELSE.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'COUNTRY'.
+        ls_sort-up = gc_x.
+        ls_sort-subtot = gc_x.
+        ls_sort-group     = '*'.
+        APPEND ls_sort TO xt_sort.
+      ENDIF.
+  ENDCASE.
+
+ENDFORM.                    " SORT_INFO_BUILD_ALV
+*&---------------------------------------------------------------------*
+*&      Form  EVENTTAB_BUILD_ALV
+*&---------------------------------------------------------------------*
+*       Add the events that are to be handled for the grid.
+*       Here we have to handle BEFORE_LINE_OUTPUT event where the Batch
+*       Heading will be written using FM 'FAGL_BATCH_HEADING_PERFORM' .
+*       in addition to TOP_OF_LIST and END_OF_LIST events
+*----------------------------------------------------------------------*
+*      <->XT_EVENTS  Table that will contain the  events to be handled
+*----------------------------------------------------------------------*
+FORM eventtab_build_alv CHANGING xt_events TYPE slis_t_event.
+
+  DATA: lt_event TYPE slis_t_event,               "Temp Table for events
+        ls_event TYPE slis_alv_event.             "Work area for XT_EVTS
+
+*    First get all the possible events for an ALV list in a temp table
+  CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+    EXPORTING
+      i_list_type = 0
+    IMPORTING
+      et_events   = lt_event.
+
+*    Now from these events select only the required ones and append into
+*    the Event Table alongwith the handler subroutine
+
+*    For the TOP_OF_PAGE event a subroutine with the same name
+*    is registered.
+  READ TABLE lt_event WITH
+           KEY name =  slis_ev_top_of_page
+                INTO ls_event.
+
+  IF sy-subrc = 0.
+    ls_event-form = ls_event-name.
+    APPEND ls_event TO xt_events.
+  ENDIF.
+
+  READ TABLE lt_event WITH                                  "1178818
+           KEY name =  slis_ev_pf_status_set                "1178818
+                INTO ls_event.                              "1178818
+  IF sy-subrc = 0.                                          "1178818
+    ls_event-form = 'HANDLE_PF_STATUS'.                     "1178818
+    APPEND ls_event TO xt_events.                           "1178818
+  ENDIF.                                                    "1178818
+
+  READ TABLE lt_event WITH                                  "1178818
+           KEY name =  slis_ev_grouplevel_change            "1178818
+                INTO ls_event.                              "1178818
+  IF sy-subrc = 0.                                          "1178818
+    ls_event-form = 'GROUPLEVEL_CHANGE'.                    "1178818
+    APPEND ls_event TO xt_events.                           "1178818
+  ENDIF.                                                    "1178818
+
+*    For the END_OF_LIST event a subroutine with the same name
+*    is registered.
+  READ TABLE lt_event WITH
+              KEY name =  slis_ev_end_of_list
+                    INTO ls_event.
+
+  IF sy-subrc = 0.
+    ls_event-form = ls_event-name.
+    APPEND ls_event TO xt_events.
+  ENDIF.
+ENDFORM.                    " EVENTTAB_BUILD_ALV
+
+*&---------------------------------------------------------------------*
+*&      Form  LAYOUT_BUILD_ALV
+*&---------------------------------------------------------------------*
+*       Set The layout attributes for ALV Grid
+*----------------------------------------------------------------------*
+*      <-> XS_LAYOUT   Structure for Layout Info
+*----------------------------------------------------------------------*
+FORM layout_build_alv  CHANGING xs_layout TYPE slis_layout_alv.
+
+*    Set Column Width Optimized & allow switching to ALV List in future
+*    Further set the zebra Pattern output
+  CLEAR xs_layout.
+  xs_layout-min_linesize = 132.
+  xs_layout-allow_switch_to_list = gc_x.
+*  xs_layout-no_totalline = gc_x.                              "1178818
+  xs_layout-list_append = 'Y'.  " for append alv
+  xs_layout-zebra = gc_x.
+  xs_layout-get_selinfos      = gc_x.                       "1133830
+
+ENDFORM.                    " LAYOUT_BUILD_ALV
+
+*&---------------------------------------------------------------------*
+*&      Form  PRINT_PARAMETERS_SET
+*&---------------------------------------------------------------------*
+*       Set the print parameters
+*----------------------------------------------------------------------*
+*      <->XS_PRINT  Structure for Print Parameters
+*----------------------------------------------------------------------*
+FORM print_parameters_set  CHANGING xs_print TYPE slis_print_alv.
+
+*    Disable display of selection info & list info in spool request
+  xs_print-no_print_selinfos  = gc_x.
+  xs_print-no_print_listinfos = gc_x.
+
+ENDFORM.                    " PRINT_PARAMETERS_SET
+
+
+*&---------------------------------------------------------------------*
+*&      Form  TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+*       Handle the TOP_OF_PAGE event. Here the batch heading
+*       is displayed using FAGL_BATCH_HEADING_PERFORM function
+*       Dynamically Called Subroutine. Microfische is handled and page
+*       heading is printed using reuse alve commentry write FM
+*----------------------------------------------------------------------*
+FORM top_of_page.                                           "#EC CALLED
+
+  DATA : ls_layout TYPE slis_layout_alv,
+         ls_width  TYPE int4.
+
+*    Get the width of ALV list and set the same for Batch Heading
+  CALL FUNCTION 'REUSE_ALV_LIST_LAYOUT_INFO_GET'
+    IMPORTING
+      es_layout     = ls_layout
+      e_width       = ls_width    "lv_linsz
+    EXCEPTIONS
+      no_infos      = 1
+      program_error = 2
+      OTHERS        = 3.
+  IF sy-subrc = 0.
+    bhdgd-lines = ls_width.
+  ENDIF.
+*    Print Microfiche lines only if user has selected the option
+  IF  mikfiche  EQ gc_x.
+    PERFORM fill_microfisch.
+  ENDIF.
+
+*    Get the current Company Code and fill in the Batch Heading
+  MOVE gt_outtab-company_code  TO bhdgd-bukrs.
+  MOVE bhdgd-bukrs TO bhdgd-werte.
+
+*    Display the Batch Heading using standard function module
+  CALL FUNCTION 'FAGL_BATCH_HEADING_PERFORM'
+    EXPORTING
+      is_bhdgd = bhdgd.
+* to print the top of page heading. periods and year
+  PERFORM batch_comment_build  CHANGING gt_top_of_page.
+
+  CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+    EXPORTING
+      it_list_commentary = gt_top_of_page.
+
+  REFRESH gt_top_of_page.
+
+ENDFORM.                    "TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+*&      Form  END_OF_LIST
+*&---------------------------------------------------------------------*
+*       Handle the END_OF_LIST event. Here the total number of records
+*       is displayed using REUSE_ALV_COMMENTARY_WRITE function
+*       Dynamically Called Subroutine
+*       Append the list of summary at the end.
+*----------------------------------------------------------------------*
+*       Uses Global tables for List heading GT_LINE1 & GT_LINE2
+*----------------------------------------------------------------------*
+FORM end_of_list.                                           "#EC CALLED
+
+*    The inputs that need to be passed to the REUSE_ALV function module
+  DATA: lt_fieldcat TYPE slis_t_fieldcat_alv,     "Field Catalog Table
+        lt_sort     TYPE slis_t_sortinfo_alv,     "Sort Information
+        lt_events   TYPE slis_t_event,            "Events to be handled
+        ls_layout   TYPE slis_layout_alv,         "Layout Structure
+        ls_print    TYPE slis_print_alv.          "Print parameters
+  DATA: ls_fieldcat TYPE slis_fieldcat_alv.        "Wa for lt_fieldcat
+
+  DATA: lt_event TYPE slis_t_event,               "Temp Table for events
+        ls_event TYPE slis_alv_event.             "Work area for lT_EVTS
+  DATA  ls_sort TYPE slis_sortinfo_alv.          "Wafor sort-info
+
+
+*   Build the fieldcatalog for the total values surrmary.
+*    First build the default field catalog  from DDIC structure
+  CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+    EXPORTING
+      i_structure_name       = gc_structname
+    CHANGING
+      ct_fieldcat            = lt_fieldcat
+    EXCEPTIONS
+      inconsistent_interface = 1
+      program_error          = 2
+      OTHERS                 = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+* Modify the structure according to the total value summary requirement
+* ONLY 3 FIELDS ARE REQUIRED.
+  LOOP AT lt_fieldcat INTO ls_fieldcat.
+
+    CASE ls_fieldcat-fieldname.
+      WHEN 'COMPANY_CODE'.
+        MOVE 2 TO ls_fieldcat-col_pos.
+      WHEN 'CUSTOMER'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'NAME'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'COUNTRY'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'CITY'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'STREET'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'CURRENCY'.
+        MOVE 1 TO ls_fieldcat-col_pos.
+      WHEN 'SALES'.
+        MOVE 3 TO ls_fieldcat-col_pos.
+        MOVE gc_x TO ls_fieldcat-do_sum.
+      WHEN 'POSTAL_CODE'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'RECON_ACCOUNT'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'REGIO'.
+        MOVE gc_x TO ls_fieldcat-tech .
+    ENDCASE.
+*    Append the data for each field to the Field Catalog table
+    MODIFY lt_fieldcat FROM ls_fieldcat
+    TRANSPORTING col_pos tech do_sum.
+    CLEAR  ls_fieldcat.
+  ENDLOOP.
+
+*    First get all the possible events for an ALV list in a temp table
+  CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+    EXPORTING
+      i_list_type = 0
+    IMPORTING
+      et_events   = lt_event.
+
+*    Set The Events of the Grid that we wish to handle.
+*    Now from these events select only the required ones and append into
+*    the Event Table alongwith the handler subroutine
+
+*    For the TOP_OF_PAGE event a subroutine with the same name
+*    is registered.
+  READ TABLE lt_event WITH KEY name =  slis_ev_top_of_page
+  INTO ls_event.
+
+  IF sy-subrc = 0.
+    ls_event-form = gc_top_of_page.
+    APPEND ls_event TO lt_events.
+  ENDIF.
+
+*    Build the Layout of the ALV grid
+*  ls_layout-colwidth_optimize = gc_x.
+  ls_layout-no_totalline = gc_x.
+  ls_layout-allow_switch_to_list = gc_x.
+  ls_layout-list_append = gc_x .       "'X'.  " Set to X
+  ls_layout-zebra = gc_x.
+
+*    Set the print parameters so that record/list info in spool req.
+*    does not appear  when report processed in background.
+  PERFORM print_parameters_set CHANGING ls_print.
+* Sort on the basis of currency and subtotal on currency.
+  ls_sort-spos = '1'.
+  ls_sort-fieldname = 'CURRENCY'.
+  ls_sort-up = gc_x.
+*        ls_sort-group     = '*'.
+  ls_sort-subtot = gc_x.
+  APPEND ls_sort TO lt_sort.
+
+  CLEAR ls_sort.
+
+
+* Call REUSE_ALV function to display the output in simple ALV list form
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = gv_repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fieldcat
+      it_sort            = lt_sort
+      i_save             = gv_save
+*     is_variant         = gs_variant
+      it_events          = lt_events
+      is_print           = ls_print
+    TABLES
+      t_outtab           = gt_outtab_summ
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+  IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+  ENDIF.
+
+
+ENDFORM.                    "END_OF_LIST
+
+*&---------------------------------------------------------------------*
+*&      Form  BATCH_COMMENT_BUILD
+*&---------------------------------------------------------------------*
+*       Test to display in top of page
+*----------------------------------------------------------------------*
+*      <--xT_TOP_OF_PAGE
+*----------------------------------------------------------------------*
+FORM batch_comment_build CHANGING
+                         xt_top_of_page TYPE slis_t_listheader.
+
+  DATA: ls_line TYPE slis_listheader.
+  DATA lv_text(50) TYPE c.                                  "#EC *
+
+
+  CLEAR ls_line.
+  ls_line-typ  = gc_listheading_type.
+  ls_line-info = pgheader.
+  APPEND ls_line TO xt_top_of_page.
+
+ENDFORM.                    " BATCH_COMMENT_BUILD
+
+*&---------------------------------------------------------------------*
+*  FORM TOP_OF_PAGE_SUM.
+*&---------------------------------------------------------------------*
+*       Handle top opf page for second list which shows the summary
+*----------------------------------------------------------------------*
+FORM top_of_page_sum.                                       "#EC CALLED
+
+  DATA: ls_line   TYPE slis_listheader,                     "#EC *
+        ls_layout TYPE slis_layout_alv,                     "#EC *
+        ls_width  TYPE int4.                                "#EC *
+
+  DATA: lv_text(255).                                       "#EC *
+
+  bhdgd-inifl = '0'.
+  CLEAR bhdgd-bukrs.
+  bhdgd-lines = sy-linsz.
+  bhdgd-uname = sy-uname.
+  bhdgd-repid = sy-repid.
+  bhdgd-line1 = sy-title.
+  bhdgd-line2 = title.
+  bhdgd-miffl = mikfiche.
+  bhdgd-separ = listsep.
+  bhdgd-domai = 'BUKRS'.
+  bhdgd-werte = '0000'.
+
+*print batch heading
+  CALL FUNCTION 'FAGL_BATCH_HEADING_PERFORM'
+    EXPORTING
+      is_bhdgd = bhdgd.
+
+  PERFORM batch_comment_build1  CHANGING gt_top_of_page.
+
+  CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+    EXPORTING
+      it_list_commentary = gt_top_of_page.
+
+  REFRESH gt_top_of_page.
+
+ENDFORM.                    "TOP_OF_PAGE_SUM
+
+*----------------------------------------------------------*
+*     FORM FOR BATCH_COMMENT_BUILD1                         *
+*----------------------------------------------------------*
+FORM batch_comment_build1 CHANGING
+                         xt_top_of_page TYPE slis_t_listheader.
+
+  DATA: ls_line TYPE slis_listheader.
+  DATA lv_text(255).
+
+  MOVE ph_line TO lv_text.
+
+  CLEAR ls_line.
+  ls_line-typ  = gc_listheading_type.
+  ls_line-info = lv_text.
+  APPEND ls_line TO xt_top_of_page.
+
+  CLEAR ls_line.
+  ls_line-typ  = gc_listheading_type.
+  ls_line-info = pgheader.
+  APPEND ls_line TO xt_top_of_page.
+
+ENDFORM.                    " BATCH_COMMENT_BUILD1
+
+*&---------------------------------------------------------------------*
+*&      Form  fill_microfisch
+*&---------------------------------------------------------------------*
+*       Fill Microfishe line based on the various condition of sort and
+*       summarization level.
+*----------------------------------------------------------------------*
+FORM fill_microfisch .
+
+  CASE konzvers.
+    WHEN space.
+      CASE kt_sort.
+        WHEN '1'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn1-bukrs = gt_outtab-company_code.
+              mifn1-akont = gt_outtab-recon_account.  "knb1-akont.
+              mifn1-kunnr = gt_outtab-customer.        "kna1-kunnr.
+              bhdgd-grpin = mifn1.
+            WHEN '1'.
+              mifn1-bukrs = gt_outtab-company_code.
+              mifn1-akont = gt_outtab-recon_account.  "knb1-akont.
+              CLEAR mifn1-kunnr.
+            WHEN '2'.
+              mifn1-bukrs = gt_outtab-company_code.
+            WHEN '3'.
+              CLEAR mifn1.
+          ENDCASE.
+          bhdgd-grpin = mifn1.
+
+*------ ... Sortierung 2 -----------------------------------------------
+        WHEN '2'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn2-bukrs = gt_outtab-company_code.  " knb1-bukrs.
+              mifn2-kunnr = gt_outtab-customer.        "kna1-kunnr.
+            WHEN '1'.
+              mifn2-bukrs = gt_outtab-company_code.  " knb1-bukrs.
+              CLEAR mifn2-kunnr.
+            WHEN '2'.
+              CLEAR mifn2.
+          ENDCASE.
+          bhdgd-grpin = mifn2.
+
+*------ ... Sortierung 3 ---------------------------------------------
+        WHEN '3'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn3-bukrs = gt_outtab-company_code.  " knb1-bukrs
+              mifn3-umstz = gt_outtab-sales.
+            WHEN '1'.
+              mifn3-bukrs = gt_outtab-company_code.  " knb1-bukrs
+              CLEAR mifn3-umstz.
+            WHEN '2'.
+              CLEAR mifn3.
+          ENDCASE.
+          bhdgd-grpin = mifn3.
+
+*------ ... Sortierung 4 --------------------------------------------
+        WHEN '4'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn4-bukrs = gt_outtab-company_code.
+              mifn4-land1 = gt_outtab-country.
+              mifn4-pstlz = gt_outtab-postal_code.
+              mifn4-kunnr = gt_outtab-customer.
+            WHEN '1'.
+              mifn4-bukrs = gt_outtab-company_code.
+              mifn4-land1 = gt_outtab-country.
+              CLEAR mifn4-kunnr.
+              CLEAR mifn4-pstlz.
+            WHEN '2'.
+              mifn4-bukrs = gt_outtab-company_code.
+              CLEAR mifn4-land1.
+            WHEN '3'.
+              CLEAR mifn4.
+          ENDCASE.
+          bhdgd-grpin = mifn4.
+      ENDCASE.
+
+*------ Konzernversion -----------------------------------------------
+*------ ... Sortierung 1---------------------------------------------
+    WHEN OTHERS.
+      CASE kt_sort.
+        WHEN '1'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk1-akont = gt_outtab-recon_account.
+              mifk1-kunnr = gt_outtab-customer.
+              mifk1-bukrs = gt_outtab-company_code.
+            WHEN '1'.
+              mifk1-akont = gt_outtab-recon_account.
+              mifk1-kunnr = gt_outtab-customer.
+              mifk1-bukrs = gt_outtab-company_code.
+            WHEN '2'.
+              mifk1-akont = gt_outtab-recon_account.
+              CLEAR mifk1-kunnr.
+            WHEN '3'.
+              CLEAR mifk1.
+          ENDCASE.
+          bhdgd-grpin = mifk1.
+
+*------ ... Sortierung 2 --------------------------------------------
+        WHEN '2'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk2-kunnr = gt_outtab-customer.
+              mifk2-bukrs = gt_outtab-company_code.
+            WHEN '1'.
+              mifk2-kunnr = gt_outtab-customer.
+              mifk2-bukrs = gt_outtab-company_code.
+            WHEN '2'.
+              CLEAR mifk2.
+          ENDCASE.
+          bhdgd-grpin = mifk2.
+**------ ... Sortierung 3 ---------------------------------------------
+        WHEN '3'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk3-umstz = gt_outtab-sales .
+            WHEN '1'.
+              mifk3-umstz = gt_outtab-sales .
+
+          ENDCASE.
+          bhdgd-grpin = mifk3.
+
+*------ ... Sortierung 4 ---------------------------------------------
+        WHEN '4'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk4-land1 = gt_outtab-country.
+              mifk4-pstlz = gt_outtab-postal_code.
+              mifk4-kunnr = gt_outtab-customer.
+              mifk4-bukrs = gt_outtab-company_code.
+            WHEN '1'.
+              mifk4-land1 = gt_outtab-country.
+              mifk4-pstlz = gt_outtab-postal_code.
+              mifk4-kunnr = gt_outtab-customer.
+            WHEN '2'.
+              CLEAR mifk4-kunnr.
+              CLEAR mifk4-pstlz.
+            WHEN '3'.
+              CLEAR mifk4.
+          ENDCASE.
+          bhdgd-grpin = mifk4.
+      ENDCASE.
+  ENDCASE.
+
+ENDFORM.                    " fill_microfisch
+
+*&--------------------------------------------------------------------*
+*&      Form  HANDLE_PF_STATUS
+*&--------------------------------------------------------------------*
+*       Handle PF status.
+*---------------------------------------------------------------------*
+*      -->EXTAB
+*---------------------------------------------------------------------*
+FORM handle_pf_status USING extab TYPE slis_t_extab.        "#EC CALLED
+  DATA: lv_linsz TYPE sy-linsz.                             "1178818
+  DATA: lt_sort TYPE slis_t_sortinfo_alv.                   "1178818
+
+  SET PF-STATUS 'APPEND'.                                   "1178818
+
+  IF NOT listsep IS INITIAL.                                "1178818
+    CALL FUNCTION 'REUSE_ALV_LIST_LAYOUT_INFO_GET'             "1178818
+      IMPORTING                                                "1178818
+        e_width = lv_linsz                                     "1178818
+        et_sort = lt_sort.                                     "1178818
+    MOVE lv_linsz TO sy-linsz.                              "1178818
+
+    IF NOT konzvers IS INITIAL.                             "1178818
+      CLEAR : bhdgd-bukrs.                                  "1178818
+    ELSE.                                                   "1178818
+      READ TABLE gt_outtab INDEX 1.                         "1178818
+      MOVE gt_outtab-company_code TO bhdgd-bukrs.           "1178818
+    ENDIF.                                                  "1178818
+
+    MOVE bhdgd-bukrs  TO bhdgd-werte.                       "1178818
+    MOVE 'BUKRS'  TO bhdgd-domai.                           "1178818
+    MOVE sy-repid TO bhdgd-repid.                           "1178818
+    MOVE sy-uname TO bhdgd-uname.                           "1178818
+
+    MOVE: listsep  TO bhdgd-separ.                          "1178818
+    PERFORM new-section(rsbtchh0).                          "1178818
+  ENDIF.                                                    "1178818
+ENDFORM.                    "HANDLE_PF_STATUS
+
+*&---------------------------------------------------------------------*
+*&      Form  reuse_alv_get_variant
+*&---------------------------------------------------------------------*
+*       To get the list of variants in popup when F4 help is requested
+*----------------------------------------------------------------------*
+*      -->IV_REPID    Report Name
+*      -->IV_HANDLE   Handle for Variant
+*      <--IV_VARIANT  Variant Name (selection parameter)
+*----------------------------------------------------------------------*
+FORM reuse_alv_get_variant
+                   USING    VALUE(iv_repid)   TYPE  sy-repid
+                            VALUE(iv_handle)  TYPE  slis_handl
+                   CHANGING iv_variant        TYPE  disvariant-variant.
+
+  DATA: lv_exit(1) TYPE c,
+        ls_variant TYPE disvariant.   " Structure for Variant
+
+  MOVE: iv_variant TO ls_variant-variant,
+        iv_handle  TO ls_variant-handle,
+        iv_repid   TO ls_variant-report.
+
+  CALL FUNCTION 'REUSE_ALV_VARIANT_F4'
+    EXPORTING
+      is_variant    = ls_variant
+      i_save        = gc_save
+    IMPORTING
+      e_exit        = lv_exit
+      es_variant    = ls_variant
+    EXCEPTIONS
+      not_found     = 1
+      program_error = 2
+      OTHERS        = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+  IF lv_exit = space.
+    MOVE ls_variant-variant TO iv_variant.
+  ENDIF.
+
+ENDFORM.                    " reuse_alv_get_variant
+*&---------------------------------------------------------------------*
+*&      Form  variant_existence_check
+*&---------------------------------------------------------------------*
+*       Check for the existence of the variant as entered in the
+*       parameter for layout variant selection
+*----------------------------------------------------------------------*
+*      -->IV_HANDLE   Handle for Variant
+*      <--IV_VARIANT  Variant Name (selection parameter)
+*----------------------------------------------------------------------*
+FORM variant_existence_check
+                    USING    VALUE(iv_handle)  TYPE  slis_handl
+                    CHANGING iv_variant        TYPE  disvariant-variant.
+
+  DATA: ls_variant TYPE disvariant.
+
+* In case if any value is entered in the parameter for layout variant
+* then check whether the variant exists
+  IF NOT iv_variant IS INITIAL.
+
+    MOVE: iv_variant TO ls_variant-variant,
+          iv_handle  TO ls_variant-handle,
+          gv_repid   TO ls_variant-report.
+
+    CALL FUNCTION 'REUSE_ALV_VARIANT_EXISTENCE'
+      EXPORTING
+        i_save        = gc_save
+      CHANGING
+        cs_variant    = ls_variant
+      EXCEPTIONS
+        wrong_input   = 1
+        not_found     = 2
+        program_error = 3
+        OTHERS        = 4.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.                    " variant_existence_check
+*&---------------------------------------------------------------------*
+*&      Form  set_output_layout
+*&---------------------------------------------------------------------*
+*       To Display the report output in ALV list
+*----------------------------------------------------------------------*
+*      -->IT_OUTTAB        Internal table for data output
+*      -->IV_REPID         Variable containing the Report ID
+*----------------------------------------------------------------------*
+FORM set_output_layout
+  TABLES   it_outtab       STRUCTURE  foap_s_rfduml00       "#EC *
+  USING    iv_repid        TYPE       syrepid.
+
+  DATA: ls_outtab   TYPE foap_s_rfduml00, " Struc. for output data
+        ls_layout   TYPE slis_layout_alv,          " Struc. for layout
+        lt_sort     TYPE slis_t_sortinfo_alv,      " Sort Catalog table
+        lt_fieldcat TYPE slis_t_fieldcat_alv,      " Field Catalog table
+        lt_events   TYPE slis_t_event.
+* Setting the counter to 1 i.e. first list. In case if FI MESSAGES will
+* be output in ALV, the layout will have to be set using this counter
+
+* Fill output internal tables with dummy data ..
+  REFRESH it_outtab.  CLEAR it_outtab.
+
+  DO 3 TIMES.
+    CALL FUNCTION 'INITIALIZE_STRUCTURE'
+      EXPORTING
+        i_n_fill   = 0
+        i_i_fill   = 0
+      CHANGING
+        c_workarea = ls_outtab.
+    APPEND ls_outtab TO it_outtab.
+  ENDDO.
+
+* Build the fieldcatalog based on the Output and Sort Sequence.
+  PERFORM fieldcatalog_build_alv CHANGING lt_fieldcat.
+
+* The Sort Information ( Fields sequence for Sorting ,
+* Subtotaling ) is prepared
+  PERFORM sort_info_build_alv CHANGING lt_sort.
+
+* Set The Events of the Grid that we wish to handle.
+  PERFORM eventtab_build_alv CHANGING lt_events.
+
+* Build the Layout of the ALV gridFF
+  PERFORM layout_build_alv CHANGING ls_layout.
+  CLEAR ls_layout-list_append.
+
+* Calling the function module for ALV list output with dummy data
+  gs_variant-report = iv_repid.
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = iv_repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fieldcat
+      it_sort            = lt_sort
+      i_save             = gc_save
+      is_variant         = gs_variant
+    TABLES
+      t_outtab           = it_outtab
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+  REFRESH it_outtab. CLEAR it_outtab.
+
+ENDFORM.                    " set_output_layout
+
+*&---------------------------------------------------------------------*
+*&      Form  set_hierarch_output_layout
+*&---------------------------------------------------------------------*
+*       To Display the report output in HIERARCHICAL ALV list
+*----------------------------------------------------------------------*
+*      -->IT_OUTTAB        Internal table for header data output
+*      -->IT_OUTTAB1       Internal table for item data output
+*      -->IV_REPID         Variable containing the Report ID
+*----------------------------------------------------------------------*
+FORM set_hierarch_output_layout
+  TABLES   it_outtab_h       STRUCTURE  foap_s_rfduml00     "#EC *
+           it_outtab_i      STRUCTURE  foap_s_rfduml00_list.
+
+  DATA: ls_outtab_h  TYPE foap_s_rfduml00, " Struc.for header data
+        ls_outtab_i  TYPE foap_s_rfduml00_list, " Struct for item output
+        ls_layout    TYPE slis_layout_alv,          " Struc. for layout
+        lt_sort      TYPE slis_t_sortinfo_alv,      " Sort Catalog table
+        lt_events    TYPE slis_t_event,
+        ls_print     TYPE slis_print_alv,       "Print parameters
+        ls_fieldcat  TYPE slis_fieldcat_alv,    "Field cat struct
+        lt_fieldcat1 TYPE slis_t_fieldcat_alv,  "Field Catalog Table1
+        lt_fieldcat2 TYPE slis_t_fieldcat_alv,  "Field Catalog Table2
+        ls_keyinfo   TYPE slis_keyinfo_alv.     "Key Field
+
+  REFRESH it_outtab_h.
+  REFRESH it_outtab_i.
+
+* Fill output internal tables with dummy data ..
+* Filling up of dummy data for header internal table
+  CALL FUNCTION 'INITIALIZE_STRUCTURE'
+    EXPORTING
+      i_n_fill   = 0
+      i_i_fill   = 0
+    CHANGING
+      c_workarea = ls_outtab_h.
+  APPEND ls_outtab_h TO it_outtab_h.
+* Filling up of dummy data for item internal table
+  DO 2 TIMES.
+    CALL FUNCTION 'INITIALIZE_STRUCTURE'
+      EXPORTING
+        i_n_fill   = 0
+        i_i_fill   = 0
+      CHANGING
+        c_workarea = ls_outtab_i.
+    APPEND ls_outtab_i TO it_outtab_i.
+  ENDDO.
+
+* Build the fieldcatalog based on the Output and Sort Sequence.
+* Header Field Catalog
+  PERFORM fieldcat_alv_build USING 'FOAP_S_RFDUML00'
+                                  CHANGING lt_fieldcat1[].
+  LOOP AT lt_fieldcat1 INTO ls_fieldcat.
+    ls_fieldcat-tabname    =  gc_output_h.
+    ls_fieldcat-key        = ''.
+    CASE ls_fieldcat-fieldname.
+      WHEN 'COMPANY_CODE'.
+        IF konzvers = gc_x.
+          ls_fieldcat-col_pos = 9.
+        ELSE.
+          ls_fieldcat-col_pos = 1.
+        ENDIF.
+      WHEN 'CITY'.
+        IF kt_sort = '4'.
+          ls_fieldcat-tech = gc_x.
+        ELSE.
+          ls_fieldcat-tech = space.
+        ENDIF.
+      WHEN 'POSTAL_CODE'.
+        IF kt_sort = '4'.
+          ls_fieldcat-tech = space.
+        ELSE.
+          ls_fieldcat-tech = gc_x.
+        ENDIF.
+    ENDCASE.
+    MODIFY lt_fieldcat1 FROM ls_fieldcat TRANSPORTING tech col_pos
+                                              tabname key.
+  ENDLOOP.
+* Item Field Catalog
+  PERFORM fieldcat_alv_build USING 'FOAP_S_RFDUML00_LIST'
+                                   CHANGING lt_fieldcat2[].
+  LOOP AT lt_fieldcat2 INTO ls_fieldcat.
+    ls_fieldcat-tabname    =  gc_output_i.
+    ls_fieldcat-key        = ''.
+    CASE ls_fieldcat-fieldname.
+      WHEN 'EMPFG'.
+      WHEN 'NAME'.
+        ls_fieldcat-offset = gc_offset.
+      WHEN 'COUNTRY'.
+      WHEN 'CITY'.
+        IF kt_sort = '4'.
+          ls_fieldcat-tech = gc_x.
+        ELSE.
+          ls_fieldcat-tech = space.
+        ENDIF.
+      WHEN 'STREET'.
+      WHEN 'CURRENCY'.
+      WHEN 'SALES'.
+        ls_fieldcat-do_sum = gc_x.
+      WHEN 'POSTAL_CODE'.
+        ls_fieldcat-tech = space.
+      WHEN 'REGIO'.
+      WHEN OTHERS.
+        ls_fieldcat-tech = gc_x.
+    ENDCASE.
+    MODIFY lt_fieldcat2 FROM ls_fieldcat TRANSPORTING tech do_sum
+                                              offset tabname key.
+  ENDLOOP.
+
+
+* We append the item data to the header data
+  APPEND LINES OF lt_fieldcat2 TO lt_fieldcat1.
+
+*    The Sort Information ( Fields sequence for Sorting ,
+*    Subtotaling ) is prepared
+  PERFORM sort_info_build_alv1 CHANGING lt_sort.
+
+* Build Key Info for Relationship between Header and Item Tables.
+  PERFORM keyinfo_alv_build CHANGING ls_keyinfo.
+
+* Layout settings.
+  ls_layout-group_change_edit = 'X'.
+  ls_layout-no_vline = 'X'.
+  ls_layout-colwidth_optimize = gc_x.
+
+* Calling Hierarchical Sequential List disp for VARIANT
+  CALL FUNCTION 'REUSE_ALV_HIERSEQ_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = gv_repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fieldcat1
+      i_save             = gc_save
+      is_variant         = gs_variant
+      it_sort            = lt_sort
+      i_tabname_header   = gc_output_h
+      i_tabname_item     = gc_output_i
+      is_keyinfo         = ls_keyinfo
+    TABLES
+      t_outtab_header    = it_outtab_h
+      t_outtab_item      = it_outtab_i
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+ENDFORM.                    " set_hierarch_output_layout
+
+*-----------------------------------------------------------------*
+*---------HIERARCHICAL LIST DISPLAY-------------------------------*
+*-----------------------------------------------------------------*
+FORM display_hierachical_alv.
+
+*    The inputs that need to be passed to the REUSE_ALV function module
+  DATA: lt_fieldcat1 TYPE slis_t_fieldcat_alv,  "Field Catalog Table1
+        lt_fieldcat2 TYPE slis_t_fieldcat_alv,  "Field Catalog Table2
+        lt_sort      TYPE slis_t_sortinfo_alv,  "Sort Information
+        lt_events    TYPE slis_t_event,         "Events to be handled
+        ls_layout    TYPE slis_layout_alv,      "Layout Structure
+        ls_print     TYPE slis_print_alv,       "Print parameters
+        ls_fieldcat  TYPE slis_fieldcat_alv,    "Field cat struct
+        ls_keyinfo   TYPE slis_keyinfo_alv.     "Key Field
+*   Build the fieldcatalog based on the Output and Sort Sequence.
+
+* Build header field catalog
+  PERFORM fieldcat_alv_build USING 'FOAP_S_RFDUML00'
+                                  CHANGING lt_fieldcat1[].
+
+  LOOP AT lt_fieldcat1 INTO ls_fieldcat.
+    ls_fieldcat-tabname    =  gc_output_h.
+    ls_fieldcat-key        = ''.
+    CASE ls_fieldcat-fieldname.
+      WHEN 'COMPANY_CODE'.
+        IF konzvers = gc_x.
+          ls_fieldcat-col_pos = 9.
+        ELSE.
+          ls_fieldcat-col_pos = 1.
+        ENDIF.
+      WHEN 'CITY'.
+        IF kt_sort = '4'.
+          ls_fieldcat-tech = gc_x.
+        ELSE.
+          ls_fieldcat-tech = space.
+        ENDIF.
+      WHEN 'POSTAL_CODE'.
+        ls_fieldcat-tech = space.
+    ENDCASE.
+    MODIFY lt_fieldcat1 FROM ls_fieldcat TRANSPORTING tech col_pos
+                                              tabname key.
+  ENDLOOP.
+
+* Build item field catalog
+  PERFORM fieldcat_alv_build USING 'FOAP_S_RFDUML00_LIST'
+                                   CHANGING lt_fieldcat2[].
+  LOOP AT lt_fieldcat2 INTO ls_fieldcat.
+    ls_fieldcat-tabname    =  gc_output_i.
+    ls_fieldcat-key        = ''.
+
+    CASE ls_fieldcat-fieldname.
+      WHEN 'EMPFG'.
+      WHEN 'NAME'.
+        IF konzvers = space.
+          ls_fieldcat-offset = gc_offset.
+        ELSE.
+          ls_fieldcat-offset = gc_offset1.
+        ENDIF.
+      WHEN 'COUNTRY'.
+      WHEN 'CITY'.
+        IF kt_sort = '4'.
+          ls_fieldcat-tech = gc_x.
+        ELSE.
+          ls_fieldcat-tech = space.
+        ENDIF.
+      WHEN 'STREET'.
+      WHEN 'CURRENCY'.
+      WHEN 'SALES'.
+        ls_fieldcat-do_sum = gc_x.
+      WHEN 'POSTAL_CODE'.
+        ls_fieldcat-tech = space.
+      WHEN 'REGIO'.
+      WHEN OTHERS.
+        ls_fieldcat-tech = gc_x.
+    ENDCASE.
+    MODIFY lt_fieldcat2 FROM ls_fieldcat TRANSPORTING tech do_sum
+                                             offset tabname key.
+  ENDLOOP.
+
+* We append the item data to the header data
+  APPEND LINES OF lt_fieldcat2 TO lt_fieldcat1.
+
+*    The Sort Information ( Fields sequence for Sorting ,
+*    Subtotaling ) is prepared
+  PERFORM sort_info_build_alv1 CHANGING lt_sort.
+
+* Build events table
+  PERFORM eventtab_build_alv1 CHANGING lt_events.
+
+* Build layout structure
+  PERFORM layout_build_alv CHANGING ls_layout.
+
+*    Set the print parameters so that record/list info in spool req.
+*    does not appear  when report processed in background.
+  PERFORM print_parameters_set CHANGING ls_print.
+
+* Build Key Info for Relationship between Header and Item Tables.
+  PERFORM keyinfo_alv_build CHANGING ls_keyinfo.
+
+* Layout settings.
+  ls_layout-group_change_edit = 'X'.
+
+* Calling HIERARCHICAL SEQUENTIAL LIST DISPLAY for output
+  CALL FUNCTION 'REUSE_ALV_HIERSEQ_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = gv_repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fieldcat1
+      it_events          = lt_events
+      it_sort            = lt_sort
+      i_save             = gc_save
+      is_variant         = gs_variant
+      i_tabname_header   = gc_output_h
+      i_tabname_item     = gc_output_i
+      is_keyinfo         = ls_keyinfo
+    TABLES
+      t_outtab_header    = gt_output_alv_h
+      t_outtab_item      = gt_output_alv_i
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+ENDFORM.                    " output_ALV
+
+*&---------------------------------------------------------------------*
+*&      Form  fieldcat_alv_build                                       *
+*&---------------------------------------------------------------------*
+*      Build field catalog for ALV Grid display                        *
+*----------------------------------------------------------------------*
+*     <--XT_FIELDCAT  Field catalog table                              *
+*----------------------------------------------------------------------*
+FORM fieldcat_alv_build  USING iv_structure TYPE dd02l-tabname
+                         CHANGING xt_fieldcat TYPE slis_t_fieldcat_alv.
+
+  CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+    EXPORTING
+      i_program_name         = gv_repid          "report name
+      i_structure_name       = iv_structure
+    CHANGING
+      ct_fieldcat            = xt_fieldcat     "field catalog
+    EXCEPTIONS
+      inconsistent_interface = 1
+      program_error          = 2
+      OTHERS                 = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+ENDFORM.                    "fieldcat_alv_build
+*&---------------------------------------------------------------------*
+*&      Form  KEYINFO_BUILD_ALV
+*&---------------------------------------------------------------------*
+*       Build Key Information for linking Header and Item
+*                              of Long Term PLanning
+*----------------------------------------------------------------------*
+*      <--> XS_KEYINFO  Structure Containing the Key Information
+*----------------------------------------------------------------------*
+FORM keyinfo_alv_build  CHANGING xs_keyinfo  TYPE  slis_keyinfo_alv.
+
+  xs_keyinfo-header01 = 'COMPANY_CODE'.
+  xs_keyinfo-item01   = 'COMPANY_CODE'.
+
+  xs_keyinfo-header02 = 'RECON_ACCOUNT'.
+  xs_keyinfo-item02   = 'RECON_ACCOUNT'.
+
+* Start of changes on 21 June 2004 : C5056175
+  xs_keyinfo-header03 = 'CUSTOMER'.
+  xs_keyinfo-item03   = 'CUSTOMER'.
+* End of changes on 21 June 2004 : C5056175
+
+ENDFORM.                    " KEYINFO_BUILD_ALV
+
+*&---------------------------------------------------------------------*
+*&      Form  SORT_INFO_BUILD_ALV
+*&---------------------------------------------------------------------*
+*    Sort the field on the basis Sort Sequence eneterd by user
+*----------------------------------------------------------------------*
+*      <->XT_SORT  Table that will contain the sort information
+*----------------------------------------------------------------------*
+FORM sort_info_build_alv1  CHANGING xt_sort TYPE slis_t_sortinfo_alv.
+
+  DATA ls_sort TYPE slis_sortinfo_alv.  "Work area for sort-info table
+
+* For each of these sort sequences you can choose between a standard
+* version and a corporate group version. In the standard version, the
+* accounts are listed per company code. In the corporate group version
+* the company codes are listed per account.
+*------ Sortierung nach Abstimmkonto
+  CASE kt_sort.
+    WHEN '1'.
+      IF konzvers = space.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'COMPANY_CODE'.
+        ls_sort-tabname   = 'GT_OUTPUT_ALV_H'.
+        ls_sort-up = gc_x.
+        ls_sort-group     = '*'.
+        ls_sort-subtot = gc_x.
+        APPEND ls_sort TO xt_sort.
+
+        CLEAR ls_sort.
+        ls_sort-spos = '2'.
+        ls_sort-fieldname = 'RECON_ACCOUNT'.
+        ls_sort-tabname   = 'GT_OUTPUT_ALV_H'.
+        ls_sort-subtot = gc_x.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+        CLEAR ls_sort.
+      ELSE.
+        CLEAR ls_sort.
+        ls_sort-spos = '1'.
+        ls_sort-fieldname = 'RECON_ACCOUNT'.
+        ls_sort-tabname   = 'GT_OUTPUT_ALV_H'.
+        ls_sort-group     = '*'.
+        ls_sort-subtot = gc_x.
+        ls_sort-up = gc_x.
+        APPEND ls_sort TO xt_sort.
+      ENDIF.
+*     WHEN OTHERS.
+  ENDCASE.
+ENDFORM.    " SORT_INFO_BUILD_ALV1
+
+*&---------------------------------------------------------------------*
+*&      Form  EVENTTAB_BUILD_ALV
+*&---------------------------------------------------------------------*
+*       Add the events that are to be handled for the grid.
+*       Here we have to handle BEFORE_LINE_OUTPUT event where the Batch
+*       Heading will be written using FM 'FAGL_BATCH_HEADING_PERFORM' .
+*       in addition to TOP_OF_LIST and END_OF_LIST events
+*----------------------------------------------------------------------*
+*      <->XT_EVENTS  Table that will contain the  events to be handled
+*----------------------------------------------------------------------*
+FORM eventtab_build_alv1 CHANGING xt_events TYPE slis_t_event.
+
+  DATA: ls_event TYPE slis_alv_event.       "Work area for xt_events
+
+  CLEAR  : xt_events.
+  REFRESH: xt_events.
+
+* First get all the possible events for an ALV list in a temp table
+  CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+    EXPORTING
+      i_list_type = 0
+    IMPORTING
+      et_events   = xt_events.
+
+  READ TABLE xt_events INTO ls_event WITH
+           KEY name =  slis_ev_top_of_page.     " Top_of_page event
+  IF sy-subrc = 0.
+    ls_event-form = gc_formname_top_of_page1.
+  ENDIF.
+
+  MODIFY xt_events FROM ls_event TRANSPORTING form
+  WHERE name = 'TOP_OF_PAGE'.
+
+  READ TABLE xt_events INTO ls_event WITH
+              KEY name =  slis_ev_end_of_list. " End_of_list event
+  IF sy-subrc = 0.
+    ls_event-form = gc_formname_end_of_list1.
+  ENDIF.
+
+  MODIFY xt_events FROM ls_event TRANSPORTING form
+  WHERE name = 'END_OF_LIST'.
+
+  READ TABLE xt_events INTO ls_event WITH                   "1365420
+              KEY name =  slis_ev_pf_status_set.            "1365420
+  IF sy-subrc = 0.                                          "1365420
+    ls_event-form = 'HANDLE_PF_STATUS'.                     "1365420
+  ENDIF.                                                    "1365420
+
+  MODIFY xt_events FROM ls_event TRANSPORTING form          "1365420
+  WHERE name = 'PF_STATUS_SET'.                             "1365420
+
+
+ENDFORM.                    " EVENTTAB_BUILD_ALV
+
+*&---------------------------------------------------------------------*
+*&      Form  TOP_OF_PAGE1
+*&---------------------------------------------------------------------*
+*       Handle the TOP_OF_PAGE event. Here the batch heading
+*       is displayed using FAGL_BATCH_HEADING_PERFORM function
+*       Dynamically Called Subroutine. Microfische is handled and page
+*       heading is printed using reuse alve commentry write FM
+*----------------------------------------------------------------------*
+FORM top_of_page1.                                          "#EC CALLED
+
+  DATA : ls_layout TYPE slis_layout_alv,
+         ls_width  TYPE int4.
+
+*    Get the width of ALV list and set the same for Batch Heading
+  CALL FUNCTION 'REUSE_ALV_LIST_LAYOUT_INFO_GET'
+    IMPORTING
+      es_layout     = ls_layout
+      e_width       = ls_width    "lv_linsz
+    EXCEPTIONS
+      no_infos      = 1
+      program_error = 2
+      OTHERS        = 3.
+  IF sy-subrc = 0.
+    bhdgd-lines = ls_width.
+  ENDIF.
+*    Print Microfiche lines only if user has selected the option
+  IF  mikfiche  EQ gc_x.
+* handle microfische line
+    PERFORM fill_microfisch_alv.
+  ENDIF.                        "IF  MIKFICHE EQ GC_X.
+
+*    Get the current Company Code and fill in the Batch Heading
+  MOVE gt_output_alv_h-company_code  TO bhdgd-bukrs.
+  MOVE bhdgd-bukrs TO bhdgd-werte.
+
+*    Display the Batch Heading using standard function module
+  CALL FUNCTION 'FAGL_BATCH_HEADING_PERFORM'
+    EXPORTING
+      is_bhdgd = bhdgd.
+* to print the top of page heading. periods and year
+  PERFORM batch_comment_build CHANGING gt_top_of_page.
+
+  CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+    EXPORTING
+      it_list_commentary = gt_top_of_page.
+
+  REFRESH gt_top_of_page.
+
+ENDFORM.                    "TOP_OF_PAGE1
+*&---------------------------------------------------------------------*
+*&      Form  END_OF_LIST1
+*&---------------------------------------------------------------------*
+*       Handle the END_OF_LIST event. Here the total number of records
+*       is displayed using REUSE_ALV_COMMENTARY_WRITE function
+*       Dynamically Called Subroutine
+*       Append the list of summary at the end.
+*----------------------------------------------------------------------*
+*       Uses Global tables for List heading GT_LINE1 & GT_LINE2
+*----------------------------------------------------------------------*
+FORM end_of_list1.                                          "#EC CALLED
+
+*    The inputs that need to be passed to the REUSE_ALV function module
+  DATA: lt_fieldcat TYPE slis_t_fieldcat_alv,     "Field Catalog Table
+        lt_sort     TYPE slis_t_sortinfo_alv,     "Sort Information
+        lt_events   TYPE slis_t_event,            "Events to be handled
+        ls_layout   TYPE slis_layout_alv,         "Layout Structure
+        ls_print    TYPE slis_print_alv.          "Print parameters
+  DATA: ls_fieldcat TYPE slis_fieldcat_alv.        "Wa for lt_fieldcat
+
+  DATA: lt_event TYPE slis_t_event,               "Temp Table for events
+        ls_event TYPE slis_alv_event.             "Work area for lT_EVTS
+  DATA  ls_sort TYPE slis_sortinfo_alv.          "Wafor sort-info
+*-------------------------------------------------------------------*
+*            FIELD CATALOG  FOR TOTAL VALUES SUMMARY                *
+*    First build the default field catalog  from DDIC structure     *
+*-------------------------------------------------------------------*
+  CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+    EXPORTING
+      i_structure_name       = gc_structname
+    CHANGING
+      ct_fieldcat            = lt_fieldcat
+    EXCEPTIONS
+      inconsistent_interface = 1
+      program_error          = 2
+      OTHERS                 = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+* Modify the structure according to the total value summary requirement
+* ONLY 3 FIELDS ARE REQUIRED.
+  LOOP AT lt_fieldcat INTO ls_fieldcat.
+
+    CASE ls_fieldcat-fieldname.
+      WHEN 'COMPANY_CODE'.
+        MOVE 2 TO ls_fieldcat-col_pos.
+      WHEN 'CUSTOMER'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'NAME'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'COUNTRY'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'CITY'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'STREET'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'CURRENCY'.
+        MOVE 1 TO ls_fieldcat-col_pos.
+      WHEN 'SALES'.
+        MOVE 3 TO ls_fieldcat-col_pos.
+        MOVE gc_x TO ls_fieldcat-do_sum.
+      WHEN 'POSTAL_CODE'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'RECON_ACCOUNT'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'REGIO'.
+        MOVE gc_x TO ls_fieldcat-tech .
+    ENDCASE.
+
+    MODIFY lt_fieldcat FROM ls_fieldcat
+    TRANSPORTING col_pos tech do_sum.
+    CLEAR  ls_fieldcat.
+  ENDLOOP.
+*-------------------------------------------------------------*
+*            EVENTS OF LIST DISPLAY                           *
+*-------------------------------------------------------------*
+  CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+    EXPORTING
+      i_list_type = 0
+    IMPORTING
+      et_events   = lt_event.
+
+  READ TABLE lt_event WITH KEY name =  slis_ev_top_of_page
+       INTO ls_event.
+  IF sy-subrc = 0.
+    ls_event-form = gc_top_of_page_sum1.
+  ENDIF.
+
+  MODIFY lt_event FROM ls_event TRANSPORTING form
+  WHERE name = 'TOP_OF_PAGE'.
+
+*---------ENDING OF GETTING EVENTS OF LIST DISPLAY------------*
+
+*-------------------------------------------------------------*
+*            LAYOUT BUILDING FOR LIST DISPLAY                 *
+*-------------------------------------------------------------*
+  ls_layout-colwidth_optimize = gc_x.
+  ls_layout-no_totalline = gc_x.
+  ls_layout-allow_switch_to_list = gc_x.
+  ls_layout-list_append = gc_x .       "'X'.  " Set to X
+  ls_layout-zebra = gc_x.
+*---------ENDING OF LAYOUT BUILDING OF LIST DISPLAY-----------*
+
+  PERFORM print_parameters_set CHANGING ls_print.
+
+*-------------------------------------------------------------*
+*            SORTING OF CURR FOR LIST DISPLAY                 *
+*-------------------------------------------------------------*
+* Sort on the basis of currency and subtotal on currency.
+  ls_sort-spos = '1'.
+  ls_sort-fieldname = 'CURRENCY'.
+  ls_sort-up = gc_x.
+  ls_sort-subtot = gc_x.
+  APPEND ls_sort TO lt_sort.
+  CLEAR ls_sort.
+*---------ENDING OF SORTING OF CURR OF LIST DISPLAY-----------*
+
+
+*-------------------------------------------------------------*
+*            LIST DISPLAY OF SUMMARY OF TOTAL                 *
+*-------------------------------------------------------------*
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = gv_repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fieldcat
+      it_sort            = lt_sort
+      i_save             = gv_save
+      it_events          = lt_event
+      is_print           = ls_print
+    TABLES
+      t_outtab           = gt_outtab_summ
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+*---------ENDING OF LIST DISPLAY OF SUMMARY OF TOTAL-------------------*
+
+ENDFORM.                    "END_OF_LIST1
+*&---------------------------------------------------------------------*
+*&      Form  fill_microfisch_alv
+*&---------------------------------------------------------------------*
+*       Fill Microfishe line based on the various condition of sort and
+*       summarization level.
+*----------------------------------------------------------------------*
+FORM fill_microfisch_alv.
+
+  CASE konzvers.
+    WHEN space.
+      CASE kt_sort.
+        WHEN '1'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn1-bukrs = gt_output_alv_h-company_code.
+              mifn1-akont = gt_output_alv_h-recon_account.
+              mifn1-kunnr = gt_output_alv_h-customer.
+              bhdgd-grpin = mifn1.
+            WHEN '1'.
+              mifn1-bukrs = gt_output_alv_h-company_code.
+              mifn1-akont = gt_output_alv_h-recon_account.
+              CLEAR mifn1-kunnr.
+            WHEN '2'.
+              mifn1-bukrs = gt_output_alv_h-company_code.
+            WHEN '3'.
+              CLEAR mifn1.
+          ENDCASE.
+          bhdgd-grpin = mifn1.
+
+*------ ... Sortierung 2 -----------------------------------------------
+        WHEN '2'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn2-bukrs = gt_output_alv_h-company_code.
+              mifn2-kunnr = gt_output_alv_h-customer.
+            WHEN '1'.
+              mifn2-bukrs = gt_output_alv_h-company_code.
+              CLEAR mifn2-kunnr.
+            WHEN '2'.
+              CLEAR mifn2.
+          ENDCASE.
+          bhdgd-grpin = mifn2.
+
+*------ ... Sortierung 3 ---------------------------------------------
+        WHEN '3'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn3-bukrs = gt_outtab-company_code.  " knb1-bukrs
+              mifn3-umstz = gt_output_alv_h-sales.
+            WHEN '1'.
+              mifn3-bukrs = gt_output_alv_h-company_code.  " knb1-bukrs
+              CLEAR mifn3-umstz.
+            WHEN '2'.
+              CLEAR mifn3.
+          ENDCASE.
+          bhdgd-grpin = mifn3.
+
+*------ ... Sortierung 4 --------------------------------------------
+        WHEN '4'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifn4-bukrs = gt_output_alv_h-company_code.
+              mifn4-land1 = gt_output_alv_h-country.
+              mifn4-pstlz = gt_output_alv_h-postal_code.
+              mifn4-kunnr = gt_output_alv_h-customer.
+            WHEN '1'.
+              mifn4-bukrs = gt_output_alv_h-company_code.
+              mifn4-land1 = gt_output_alv_h-country.
+              CLEAR mifn4-kunnr.
+              CLEAR mifn4-pstlz.
+            WHEN '2'.
+              mifn4-bukrs = gt_output_alv_h-company_code.
+              CLEAR mifn4-land1.
+            WHEN '3'.
+              CLEAR mifn4.
+          ENDCASE.
+          bhdgd-grpin = mifn4.
+      ENDCASE.
+
+*------ Konzernversion -----------------------------------------------
+*------ ... Sortierung 1---------------------------------------------
+    WHEN OTHERS.
+      CASE kt_sort.
+        WHEN '1'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk1-akont = gt_output_alv_h-recon_account.
+              mifk1-kunnr = gt_output_alv_h-customer.
+              mifk1-bukrs = gt_output_alv_h-company_code.
+            WHEN '1'.
+              mifk1-akont = gt_output_alv_h-recon_account.
+              mifk1-kunnr = gt_output_alv_h-customer.
+              mifk1-bukrs = gt_output_alv_h-company_code.
+
+*              clear mifk1-bukrs.
+            WHEN '2'.
+              mifk1-akont = gt_output_alv_h-recon_account.
+              CLEAR mifk1-kunnr.
+            WHEN '3'.
+              CLEAR mifk1.
+          ENDCASE.
+          bhdgd-grpin = mifk1.
+
+*------ ... Sortierung 2 --------------------------------------------
+        WHEN '2'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk2-kunnr = gt_output_alv_h-customer.
+              mifk2-bukrs = gt_output_alv_h-company_code.
+            WHEN '1'.
+              mifk2-kunnr = gt_output_alv_h-customer.
+              mifk2-bukrs = gt_output_alv_h-company_code.
+
+*              clear mifk2-bukrs.
+            WHEN '2'.
+              CLEAR mifk2.
+          ENDCASE.
+          bhdgd-grpin = mifk2.
+**------ ... Sortierung 3 ---------------------------------------------
+        WHEN '3'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk3-umstz = gt_output_alv_h-sales .
+            WHEN '1'.
+              mifk3-umstz = gt_output_alv_h-sales .
+
+          ENDCASE.
+          bhdgd-grpin = mifk3.
+
+*------ ... Sortierung 4 ---------------------------------------------
+        WHEN '4'.
+          CASE vd_stufe.
+            WHEN '0'.
+              mifk4-land1 = gt_output_alv_h-country.
+              mifk4-pstlz = gt_output_alv_h-postal_code.
+              mifk4-kunnr = gt_output_alv_h-customer.
+              mifk4-bukrs = gt_output_alv_h-company_code.
+            WHEN '1'.
+              mifk4-land1 = gt_output_alv_h-country.
+              mifk4-pstlz = gt_output_alv_h-postal_code.
+              mifk4-kunnr = gt_output_alv_h-customer.
+
+*              clear mifk4-bukrs.
+            WHEN '2'.
+              CLEAR mifk4-kunnr.
+              CLEAR mifk4-pstlz.
+            WHEN '3'.
+              CLEAR mifk4.
+          ENDCASE.
+          bhdgd-grpin = mifk4.
+      ENDCASE.
+  ENDCASE.
+
+ENDFORM.                    " fill_microfisch_alv
+*&---------------------------------------------------------------------*
+*  FORM TOP_OF_PAGE_SUM1.                                              *
+*&---------------------------------------------------------------------*
+*       Handle top of page for second list which shows the summary     *
+*----------------------------------------------------------------------*
+FORM top_of_page_sum1.                                      "#EC CALLED
+
+  DATA: ls_line   TYPE slis_listheader,
+        ls_layout TYPE slis_layout_alv,
+        ls_width  TYPE int4.
+  DATA lv_text(255).
+
+
+  MOVE ph_line TO lv_text.
+
+  bhdgd-inifl = '0'.
+  CLEAR bhdgd-bukrs.
+  bhdgd-lines = sy-linsz.
+  bhdgd-uname = sy-uname.
+  bhdgd-repid = sy-repid.
+  bhdgd-line1 = sy-title.
+  bhdgd-line2 = title.
+  bhdgd-miffl = mikfiche.
+  bhdgd-separ = listsep.
+  bhdgd-domai = 'BUKRS'.
+  bhdgd-werte = '0000'.
+
+*print batch heading
+  CALL FUNCTION 'FAGL_BATCH_HEADING_PERFORM'
+    EXPORTING
+      is_bhdgd = bhdgd.
+
+  PERFORM batch_comment_build1  CHANGING gt_top_of_page.
+
+  CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+    EXPORTING
+      it_list_commentary = gt_top_of_page.
+
+  REFRESH gt_top_of_page.
+
+ENDFORM.                    "TOP_OF_PAGE_SUM1
+
+*&---------------------------------------------------------------------*
+*&      Form  display_alv_SUMM
+*&---------------------------------------------------------------------*
+*       Display the ALV SUMM output.
+*----------------------------------------------------------------------*
+FORM display_alv_summ .
+
+*    The inputs that need to be passed to the REUSE_ALV function module
+  DATA: lt_fieldcat TYPE slis_t_fieldcat_alv,     "Field Catalog Table
+        lt_sort     TYPE slis_t_sortinfo_alv,     "Sort Information
+        lt_events   TYPE slis_t_event,            "Events to be handled
+        ls_layout   TYPE slis_layout_alv,         "Layout Structure
+        ls_print    TYPE slis_print_alv.          "Print parameters
+  DATA: ls_fieldcat TYPE slis_fieldcat_alv.        "Wa for lt_fieldcat
+
+  DATA: lt_event TYPE slis_t_event,               "Temp Table for events
+        ls_event TYPE slis_alv_event.             "Work area for lT_EVTS
+  DATA  ls_sort TYPE slis_sortinfo_alv.          "Wafor sort-info
+
+
+*   Build the fieldcatalog for the total values surrmary.
+*    First build the default field catalog  from DDIC structure
+  CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+    EXPORTING
+      i_structure_name       = gc_structname
+    CHANGING
+      ct_fieldcat            = lt_fieldcat
+    EXCEPTIONS
+      inconsistent_interface = 1
+      program_error          = 2
+      OTHERS                 = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+* Modify the structure according to the total value summary requirement
+* ONLY 3 FIELDS ARE REQUIRED.
+  LOOP AT lt_fieldcat INTO ls_fieldcat.
+
+    CASE ls_fieldcat-fieldname.
+      WHEN 'COMPANY_CODE'.
+        MOVE 2 TO ls_fieldcat-col_pos.
+      WHEN 'CUSTOMER'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'NAME'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'COUNTRY'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'CITY'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'STREET'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'CURRENCY'.
+        MOVE 1 TO ls_fieldcat-col_pos.
+      WHEN 'SALES'.
+        MOVE 3 TO ls_fieldcat-col_pos.
+        MOVE gc_x TO ls_fieldcat-do_sum.
+      WHEN 'POSTAL_CODE'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'RECON_ACCOUNT'.
+        MOVE gc_x TO ls_fieldcat-tech .
+      WHEN 'REGIO'.
+        MOVE gc_x TO ls_fieldcat-tech .
+    ENDCASE.
+*    Append the data for each field to the Field Catalog table
+    MODIFY lt_fieldcat FROM ls_fieldcat
+    TRANSPORTING col_pos tech do_sum.
+    CLEAR  ls_fieldcat.
+  ENDLOOP.
+
+*    First get all the possible events for an ALV list in a temp table
+  CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+    EXPORTING
+      i_list_type = 0
+    IMPORTING
+      et_events   = lt_event.
+
+*    Set The Events of the Grid that we wish to handle.
+*    Now from these events select only the required ones and append into
+*    the Event Table alongwith the handler subroutine
+
+*    For the TOP_OF_PAGE event a subroutine with the same name
+*    is registered.
+  READ TABLE lt_event WITH KEY name =  slis_ev_top_of_page
+  INTO ls_event.
+
+  IF sy-subrc = 0.
+    ls_event-form = gc_top_of_page.
+    APPEND ls_event TO lt_events.
+  ENDIF.
+
+*    Build the Layout of the ALV grid
+*  ls_layout-colwidth_optimize = gc_x.
+  ls_layout-no_totalline = gc_x.
+  ls_layout-allow_switch_to_list = gc_x.
+  ls_layout-list_append = gc_x .       "'X'.  " Set to X
+  ls_layout-zebra = gc_x.
+
+*    Set the print parameters so that record/list info in spool req.
+*    does not appear  when report processed in background.
+  PERFORM print_parameters_set CHANGING ls_print.
+* Sort on the basis of currency and subtotal on currency.
+  ls_sort-spos = '1'.
+  ls_sort-fieldname = 'CURRENCY'.
+  ls_sort-up = gc_x.
+  ls_sort-subtot = gc_x.
+  APPEND ls_sort TO lt_sort.
+
+  CLEAR ls_sort.
+
+
+* Call REUSE_ALV function to display the output in simple ALV list form
+
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = gv_repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fieldcat
+      it_sort            = lt_sort
+      i_save             = gv_save
+      it_events          = lt_events
+      is_print           = ls_print
+    TABLES
+      t_outtab           = gt_outtab_summ
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+  IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+  ENDIF.
+ENDFORM.                    "display_alv_SUMM
+
+*&--------------------------------------------------------------------*
+*&      Form  grouplevel_change
+*&--------------------------------------------------------------------*
+*       Needed for the List seperation -----------------> NOTE "1178818
+*---------------------------------------------------------------------*
+FORM grouplevel_change  USING ls_lineinfo TYPE slis_lineinfo
+                              ls_groups   TYPE kkblo_grouplevels."#EC
+  IF NOT listsep IS INITIAL.
+    IF gd_bukrs IS INITIAL.
+      bhdgd-bukrs = gd_bukrs = gt_outtab-company_code.
+      MOVE bhdgd-bukrs  TO bhdgd-werte.
+      MOVE 'BUKRS'  TO bhdgd-domai.
+      MOVE sy-repid TO bhdgd-repid.
+      MOVE sy-uname TO bhdgd-uname.
+
+      MOVE: listsep  TO bhdgd-separ.
+      PERFORM new-section(rsbtchh0).
+    ENDIF.
+    IF ( gd_bukrs NE gt_outtab-company_code ).
+      MOVE gt_outtab-company_code TO bhdgd-bukrs.
+      MOVE bhdgd-bukrs  TO bhdgd-werte.
+      MOVE 'BUKRS'  TO bhdgd-domai.
+      MOVE sy-repid TO bhdgd-repid.
+      MOVE sy-uname TO bhdgd-uname.
+
+      MOVE: listsep  TO bhdgd-separ.
+      PERFORM new-section(rsbtchh0).
+      gd_bukrs = gt_outtab-company_code.
+    ENDIF.
+  ENDIF.
+ENDFORM.                    "grouplevel_change
